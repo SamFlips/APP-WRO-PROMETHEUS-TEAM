@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- CH340 USB-Serial chip (muy común en Arduinos clones) -->
+    <usb-device vendor-id="6790" product-id="29987" />
+
+    <!-- Arduino Uno original -->
+    <usb-device vendor-id="9025" product-id="67" />
+
+    <!-- Arduino Nano con CH340 -->
+    <usb-device vendor-id="6790" product-id="29987" />
+
+    <!-- FTDI FT232 (otro chip USB-Serial común) -->
+    <usb-device vendor-id="1027" product-id="24577" />
+
+    <!-- Agregamos más variantes comunes -->
+    <usb-device vendor-id="2341" product-id="0043" />
+    <usb-device vendor-id="2341" product-id="0001" />
+    <usb-device vendor-id="1A86" product-id="7523" />
+</resources>

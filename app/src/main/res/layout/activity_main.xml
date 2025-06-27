@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ImageView
+        android:id="@+id/imageView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:scaleType="fitCenter"
+        app:layout_constraintBottom_toTopOf="@+id/buttonContainer"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintVertical_bias="0.0"
+        tools:layout_editor_absoluteX="0dp" />
+
+    <LinearLayout
+        android:id="@+id/buttonContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="4dp"
+        android:orientation="vertical"
+        android:padding="16dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        tools:layout_editor_absoluteX="0dp">
+
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Estado: Esperando detección..."
+            android:textSize="14sp"
+            android:padding="12dp"
+            android:background="#F5F5F5"
+            android:maxLines="5"
+            android:scrollbars="vertical"
+            android:textColor="#333333" />
+
+        <Button
+            android:id="@+id/btnConnect"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Conectar" />
+
+        <Button
+            android:id="@+id/btnLedOn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Encender LED" />
+
+        <Button
+            android:id="@+id/btnLedOff"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Apagar LED" />
+
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
