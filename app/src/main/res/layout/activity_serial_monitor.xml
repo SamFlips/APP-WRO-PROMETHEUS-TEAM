@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".SerialMonitorActivity">
+
+    <!-- Título para el monitor serial -->
+    <TextView
+        android:id="@+id/tvTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#212121"
+        android:gravity="left"
+        android:padding="8dp"
+        android:text="  WRO Prometheus                   Monitor Serial"
+        android:textColor="@android:color/white"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Estado de conexión debajo del título -->
+    <TextView
+        android:id="@+id/tvConnectionStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#4CAF50"
+        android:gravity="center"
+        android:padding="6dp"
+        android:text="Estado: Conectando..."
+        android:textColor="@android:color/white"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tvTitle" />
+
+    <!-- Área principal del monitor serial  -->
+    <ScrollView
+        android:id="@+id/scrollViewOutput"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#000000"
+        android:fillViewport="true"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tvConnectionStatus">
+
+        <TextView
+            android:id="@+id/tvSerialOutput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:padding="8dp"
+            android:text="=== Monitor Serial Iniciando ===\n"
+            android:textColor="#00FF00"
+            android:textIsSelectable="true"
+            android:textSize="12sp" />
+
+    </ScrollView>
+
+    <!-- Controles en la parte inferior  -->
+    <LinearLayout
+        android:id="@+id/controlsContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="16dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <!-- Switch para auto-scroll -->
+        <Switch
+            android:id="@+id/switchAutoScroll"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical"
+            android:layout_marginEnd="16dp"
+            android:text="Auto-scroll"
+            android:textSize="12sp" />
+
+
+
+        <!-- Botón Cerrar -->
+        <Button
+            android:id="@+id/btnClear"
+            android:layout_width="0dp"
+            android:layout_height="41dp"
+            android:layout_marginEnd="8dp"
+            android:layout_weight="1"
+            android:background="#FF9800"
+            android:text="Limpiar"
+            android:textColor="@android:color/white"
+            android:textSize="12sp" />
+
+        <!-- Botón Limpiar -->
+        <Button
+            android:id="@+id/btnClose"
+            android:layout_width="0dp"
+            android:layout_height="41dp"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:background="#F44336"
+            android:text="Cerrar"
+            android:textColor="@android:color/white"
+            android:textSize="12sp" />
+
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

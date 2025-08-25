@@ -6,11 +6,12 @@
     <!-- Arduino Uno original -->
     <usb-device vendor-id="9025" product-id="67" />
 
-    <!-- Arduino Nano con CH340 -->
-    <usb-device vendor-id="6790" product-id="29987" />
-
     <!-- FTDI FT232 (otro chip USB-Serial común) -->
     <usb-device vendor-id="1027" product-id="24577" />
+
+    <!-- ESP32 (Silicon Labs) -->
+    <usb-device vendor-id="10C4" product-id="EA60" />
+
 
     <!-- Agregamos más variantes comunes -->
     <usb-device vendor-id="2341" product-id="0043" />

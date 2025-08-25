@@ -25,7 +25,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.OpenCV_Prueba"
+        android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
         tools:targetApi="31">
 
         <activity
@@ -52,9 +52,14 @@
             <meta-data
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
-
         </activity>
 
+        <activity
+            android:name=".SerialMonitorActivity"
+            android:label="Monitor Serial"
+            android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
+            android:screenOrientation="portrait"
+            android:exported="false" />
         <receiver
             android:name=".UsbPermissionReceiver"
             android:exported="false"/>
