@@ -1,1 +1,8 @@
 /build
+app/release/app-release.apk
+app/release/
+/OpenCV/build/
+*.apk
+*.aar
+*.so
+*.a

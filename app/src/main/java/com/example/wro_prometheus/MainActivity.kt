@@ -1,13 +1,13 @@
 // ===================================================================================
 // Proyecto: WRO Prometheus App
 // Descripción: Aplicación de Android para la detección y reconocimiento de colores de los obstaculos y el estacionamiento de la competencia World Robot Olympiad (WRO) 2025.
-// Categoria Futuros Ingenieros. Usando OpenCV y comunicacion serial USB con el arduino
+// Categoria Futuros Ingenieros. Usando OpenCV y comunicacion serial USB con el esp32
 //
 // Desarrollado por:
 // Equipo: [PROMETHEUS TEAM]
 // Integrantes: [Samuel Pérez], [Trino Carrisales], [Leandro Padrón]
 //
-// Programador Principal:
+// Programador Principal APP:
 // [Samuel Pérez]
 //
 // Fecha de Creación: 20/4/2025
@@ -57,7 +57,7 @@ import android.graphics.Typeface
 import android.util.Log
 import com.example.wro_prometheus.ColorAnalyzer.Companion.DualObjectDetection
 import com.example.wro_prometheus.ColorAnalyzer.Companion.ObjectPosition
-import com.example.wro_prometheus.CommandManager  // <-- AGREGAR ESTA LÍNEA
+import com.example.wro_prometheus.CommandManager
 
 
 // MainActivity es la actividad principal de la aplicación.
@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
     // Acción de intento para solicitar permisos USB.
     private val ACTION_USB_PERMISSION = "com.example.opencvserial.USB_PERMISSION"
+
     // Código de solicitud para permisos de cámara.
     private val CAMERA_PERMISSION_REQUEST_CODE = 100
 
@@ -78,21 +79,24 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         private const val DETECTION_TIMEOUT = 300L
         private const val USB_WRITE_TIMEOUT = 500
         private const val USB_READ_TIMEOUT = 200
-        private const val USB_SETUP_DELAY = 500L
-        private const val USB_RECONNECT_DELAY = 2000L
+        private const val USB_SETUP_DELAY = 300L
+        private const val USB_RECONNECT_DELAY = 1200L
         private const val MAX_WRITE_RETRIES = 2       // Máximo reintentos de escritura
 
         private const val INCOMING_DATA_BUFFER_SIZE = 2048
 
         // CONSTANTES PARA CÁLCULOS DE DISTANCIA
         // Área de referencia (en píxeles cuadrados) de un objeto a una distancia conocida.
-        const val REFERENCE_AREA = 26000.0  // Área de referencia a 30cm
+        const val REFERENCE_AREA = 11100.0  // Área de referencia a 30cm
+
         // Distancia de referencia en centímetros a la que se obtuvo REFERENCE_AREA.
-        const val REFERENCE_DISTANCE = 30.0 // Distancia de referencia en cm
+        const val REFERENCE_DISTANCE = 60.0 // Distancia de referencia en cm
+
         // Distancia mínima en centímetros que se puede calcular o enviar.
         const val MIN_DISTANCE = 10        // Distancia mínima en cm
+
         // Distancia máxima en centímetros que se puede calcular o enviar.
-        const val MAX_DISTANCE = 150       // Distancia máxima en cm
+        const val MAX_DISTANCE = 200       // Distancia máxima en cm
 
         // PATRÓN SINGLETON - Variables estáticas para acceso global
         private var instance: MainActivity? = null
@@ -108,12 +112,9 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         private var incomingDataProcessor: ExecutorService? = null
 
         // CONSTANTES ESPECÍFICAS PARA ESP32
-        private const val ESP32_SETUP_DELAY = 2000L      // ESP32 necesita más tiempo para inicializar
-        private const val ESP32_RESET_DELAY = 1500L      // Tiempo después del reset de ESP32
-        private const val ESP32_DTR_RTS_DELAY = 200L     // Delay específico para señales ESP32
-
-        // Baud rates comunes para ESP32
-        private val ESP32_BAUD_RATES = arrayOf(115200, 921600, 460800, 230400)
+        private const val ESP32_SETUP_DELAY = 1000L      // ESP32 necesita más tiempo para inicializar
+        private const val ESP32_RESET_DELAY = 800L      // Tiempo después del reset de ESP32
+        private const val ESP32_DTR_RTS_DELAY = 150L     // Delay específico para señales ESP32
 
         private val SERIAL_MONITOR_REQUEST_CODE = 1001
 
@@ -134,6 +135,8 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
     private lateinit var imageView: ImageView // ImageView para mostrar el frame de la cámara.
     private lateinit var cameraExecutor: ExecutorService // Executor para tareas de la cámara.
     private var imageAnalyzer: ImageAnalysis? = null // Analizador de imagen para CameraX.
+    private var camera: androidx.camera.core.Camera? = null // Instancia de cámara para controlar linterna.
+    private val isTorchOn = AtomicBoolean(false) // Estado actual de la linterna.
 
     // VARIABLES PARA DESPERTAR PANTALLA
     private var wakeLock: PowerManager.WakeLock? = null
@@ -149,14 +152,16 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
     private var toast: Toast? = null // Objeto Toast para mostrar mensajes al usuario.
 
     // Sistema de cola de comandos para procesamiento ultra rápido.
-    private val commandQueue = LinkedBlockingQueue<String>() // Cola de comandos a enviar al Arduino.
+    private val commandQueue =
+        LinkedBlockingQueue<String>() // Cola de comandos a enviar al Arduino.
     private lateinit var commandProcessor: ExecutorService // Executor para procesar la cola de comandos.
 
     // Executor dedicado para USB con alta prioridad.
     private lateinit var usbExecutor: ExecutorService // Executor para operaciones USB.
 
     // Coroutine scope optimizado.
-    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob()) // Scope para corrutinas con manejo de errores.
+    private val scope =
+        CoroutineScope(Dispatchers.Default + SupervisorJob()) // Scope para corrutinas con manejo de errores.
 
     private var isSerialMonitorOpen = AtomicBoolean(false)
 
@@ -164,20 +169,57 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
     private var lastMessageTime = 0L
     private val MESSAGE_DISPLAY_DURATION = 3000L // 3 segundos
 
-// =============================================================================
+    // =============================================================================
 // VARIABLES PARA FILTRO TEMPORAL DE DETECCIONES
 // =============================================================================
     // Tiempo mínimo que debe mantenerse una detección antes de enviar comando
-    private val DETECTION_STABILITY_TIME = 1000L // 1 segundo
+    private val DETECTION_STABILITY_TIME = 2000L // 1 segundo
 
-    // Variables para seguimiento temporal de detecciones
-    private var currentStableDetection = AtomicReference<String>("") // Detección que se está estabilizando
-    private var detectionStartTime = AtomicReference<Long>(0L) // Momento cuando inició la detección actual
-    private var isDetectionStable = AtomicBoolean(false) // Si la detección actual ya es estable
-    private var lastStableCommand = AtomicReference<String>("") // Último comando estable enviado
+    private var currentStableDetection = AtomicReference<String>("")
+    private var detectionStartTime = AtomicReference<Long>(0L)
+    private var isDetectionStable = AtomicBoolean(false)
+    private var lastStableCommand = AtomicReference<String>("")
+    // Ventana deslizante de los últimos N comandos detectados para votación por mayoría
+    private val detectionWindow = ArrayDeque<String>(10)
+    private val detectionWindowLock = Any()
+    private val DETECTION_WINDOW_SIZE = 8      // cuántos frames considera la ventana
+    private val DETECTION_MAJORITY_RATIO = 0.7 // 70% de frames deben coincidir
+    private var stableCommandSentTime = AtomicReference<Long>(0L)
+    private val STABLE_STATE_EXPIRY_TIME = 3000L
+    private var lastFrameTime = AtomicReference<Long>(0L)
+    private val MAX_FRAME_GAP_MS = 300L
 
     // Executor dedicado para el filtro temporal
     private lateinit var temporalFilterExecutor: ExecutorService
+
+    private var lastToastTime = 0L
+    private val TOAST_COOLDOWN = 500L // 500ms entre toast
+    private var pendingToastRunnable: Runnable? = null
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private lateinit var audioManager: AudioManager
+
+    private val importConfigLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let {
+            val json = ConfigExporter.readTextFromUri(this, it)
+            if (json != null && ConfigExporter.importFromJson(this, json)) {
+                Toast.makeText(this, "✅ Configuración importada correctamente", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(this, "❌ Error al importar — archivo inválido", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun exportConfiguration() {
+        val json = ConfigExporter.exportToJson(this)
+        startActivity(Intent.createChooser(ConfigExporter.buildShareIntent(this, json), "Compartir configuración"))
+    }
+
+    fun importConfiguration() {
+        importConfigLauncher.launch(arrayOf("application/json", "text/plain"))
+    }
 
 
     // Metodo onCreate se llama cuando la actividad es creada.
@@ -212,6 +254,13 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         // CONFIGURAR POWER MANAGER
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+
+        audioManager = AudioManager.getInstance(this)
+
+        ColorConfig.loadPresets(this)
+        ColorConfig.loadMagentaPreset(this)
+        ConfigSettings.initialize(this)
+
 
         // Inicializa los elementos de la UI.
         tvStatus = findViewById(R.id.tvStatus)
@@ -251,6 +300,9 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                 showToastOnce("❌ Conecta primero un dispositivo USB")
             }
         }
+        findViewById<Button>(R.id.btnSettings).setOnClickListener {
+            showSettingsDialog()
+        }
 
         // Configura el receptor de permisos USB.
         setupUsbReceiver()
@@ -282,7 +334,6 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
     }
 
-
     // Métodos públicos para acceder a los objetos USB desde SerialMonitorActivity
     fun getUsbPort(): UsbSerialPort? = port
 
@@ -305,6 +356,29 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         return Pair(lastSentCommand.get(), lastCommandTime)
     }
 
+    // =============================================================================
+    // CONTROL DE LINTERNA
+    // =============================================================================
+
+    fun isTorchAvailable(): Boolean = camera?.cameraInfo?.hasFlashUnit() == true
+
+    fun isTorchEnabled(): Boolean = isTorchOn.get()
+
+    /** Enciende o apaga la linterna. Persiste el estado en ConfigSettings. */
+    fun setTorch(enabled: Boolean) {
+        val cam = camera ?: return
+        if (!cam.cameraInfo.hasFlashUnit()) {
+            showToastOnce("Este dispositivo no tiene linterna")
+            return
+        }
+        isTorchOn.set(enabled)
+        ConfigSettings.torchEnabled = enabled
+        cam.cameraControl.enableTorch(enabled)
+    }
+
+    /** Alterna el estado actual de la linterna. */
+    fun toggleTorch() = setTorch(!isTorchOn.get())
+
     fun getDualDetectionInfo(): DualObjectDetection {
         return ColorAnalyzer.lastDualDetection
     }
@@ -314,7 +388,12 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         return detection.primaryObject?.let { obj ->
             // CORRECCIÓN: Llamar a CommandManager directamente
             val distance = CommandManager.calculateDistance(obj.area)
-            val orientation = CommandManager.calculateOrientation(obj.centerX, obj.centerY, obj.imageWidth, obj.imageHeight)
+            val orientation = CommandManager.calculateOrientation(
+                obj.centerX,
+                obj.centerY,
+                obj.imageWidth,
+                obj.imageHeight
+            )
             "Color: ${obj.color}, Distancia: ${distance}cm, Orientación: $orientation, Área: ${obj.area.toInt()}px"
         } ?: "Sin objeto primario"
     }
@@ -324,7 +403,12 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         return detection.secondaryObject?.let { obj ->
             // CORRECCIÓN: Llamar a CommandManager directamente
             val distance = CommandManager.calculateDistance(obj.area)
-            val orientation = CommandManager.calculateOrientation(obj.centerX, obj.centerY, obj.imageWidth, obj.imageHeight)
+            val orientation = CommandManager.calculateOrientation(
+                obj.centerX,
+                obj.centerY,
+                obj.imageWidth,
+                obj.imageHeight
+            )
             "Color: ${obj.color}, Distancia: ${distance}cm, Orientación: $orientation, Área: ${obj.area.toInt()}px"
         } ?: "Sin objeto secundario"
     }
@@ -408,7 +492,8 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
             while (!Thread.currentThread().isInterrupted) {
                 try {
-                    val command = commandQueue.take() // Bloquea hasta que haya un comando en la cola.
+                    val command =
+                        commandQueue.take() // Bloquea hasta que haya un comando en la cola.
 
                     // LOG del comando que se va a procesar
                     Log.d("CommandProcessor", "📦 Procesando comando de la cola: $command")
@@ -441,26 +526,26 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
                 val currentTime = System.currentTimeMillis()
 
-                // Solo enviar "N" cuando:
-                // 1. Hay timeout desde la última detección real
-                // 2. No se está procesando ningún comando en el filtro temporal
-                // 3. No se está enviando "N" ya
-                // 4. Está conectado y no hay monitor abierto
+                // Enviar "N" directamente cuando hay timeout
                 if (currentTime - lastDetectionTime > DETECTION_TIMEOUT &&
-                    !isDetectionStable.get() && // No hay comando estabilizándose
-                    currentStableDetection.get().isEmpty() && // No hay detección en proceso
+                    !isDetectionStable.get() &&
+                    currentStableDetection.get().isEmpty() &&
                     lastSentCommand.get() != ArduinoCommands.NO_DETECTION &&
                     isConnected.get() &&
                     !isSerialMonitorOpen.get()) {
 
-                    Log.d("DetectionMonitor", "⏰ Timeout detectado - enviando N")
+                    Log.d("DetectionMonitor", "Timeout detectado - enviando N inmediatamente")
 
                     // Limpiar variables del filtro temporal
                     currentStableDetection.set("")
                     detectionStartTime.set(0L)
                     isDetectionStable.set(false)
+                    lastStableCommand.set(ArduinoCommands.NO_DETECTION)
 
-                    queueCommand(ArduinoCommands.NO_DETECTION)
+                    // ENVIAR "N" DIRECTAMENTE
+                    currentDetection.set(ArduinoCommands.NO_DETECTION)
+                    lastDetectionTime = currentTime
+                    sendCommandImmediate(ArduinoCommands.NO_DETECTION)
                 }
             }
         }
@@ -481,7 +566,10 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
                 // Obtener información del dispositivo conectado
                 val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, android.hardware.usb.UsbDevice::class.java)
+                    intent.getParcelableExtra(
+                        UsbManager.EXTRA_DEVICE,
+                        android.hardware.usb.UsbDevice::class.java
+                    )
                 } else {
                     @Suppress("DEPRECATION")
                     intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
@@ -507,7 +595,10 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
             UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                 val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, android.hardware.usb.UsbDevice::class.java)
+                    intent.getParcelableExtra(
+                        UsbManager.EXTRA_DEVICE,
+                        android.hardware.usb.UsbDevice::class.java
+                    )
                 } else {
                     @Suppress("DEPRECATION")
                     intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
@@ -545,21 +636,36 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
     }
 
     // Procesa la detección de un pilar con su color, área, centro y dimensiones de la imagen.
-    private fun processPilarDetection(color: String, area: Double, centerX: Float, centerY: Float, imageWidth: Int, imageHeight: Int) {
+    private fun processPilarDetection(
+        color: String,
+        area: Double,
+        centerX: Float,
+        centerY: Float,
+        imageWidth: Int,
+        imageHeight: Int
+    ) {
         if (area < MIN_AREA_THRESHOLD) return
 
         try {
             // Usar las funciones locales que internamente usan CommandManager
             val distance = CommandManager.calculateDistance(area)
-            val orientation = CommandManager.calculateOrientation(centerX, centerY, imageWidth, imageHeight)
+            val orientation =
+                CommandManager.calculateOrientation(centerX, centerY, imageWidth, imageHeight)
 
 
             // Obtener comando del CommandManager
-            val (command, commandInfo) = CommandManager.determineCommandSafe(color, orientation, distance)
+            val (command, commandInfo) = CommandManager.determineCommandSafe(
+                color,
+                orientation,
+                distance
+            )
 
             // Debug info mejorado
             Log.d("CommandSystem", "=== PROCESANDO DETECCIÓN ===")
-            Log.d("CommandSystem", "Color: $color | Orientación: $orientation | Distancia: ${distance}cm")
+            Log.d(
+                "CommandSystem",
+                "Color: $color | Orientación: $orientation | Distancia: ${distance}cm"
+            )
             Log.d("CommandSystem", "Comando generado: $command | Info: $commandInfo")
             Log.d("CommandSystem", "Último enviado: ${lastSentCommand.get()}")
 
@@ -590,22 +696,19 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
     private fun queueCommand(command: String) {
         val currentTime = System.currentTimeMillis()
 
-        // Log de entrada
-        Log.d("CommandQueue", "=== INTENTANDO ENCOLAR ===")
+        Log.d("CommandQueue", "=== SISTEMA SIMPLIFICADO ===")
         Log.d("CommandQueue", "Comando: $command")
         Log.d("CommandQueue", "Último enviado: ${lastSentCommand.get()}")
-        Log.d("CommandQueue", "Conectado: ${isConnected.get()}")
-        Log.d("CommandQueue", "Monitor abierto: ${isSerialMonitorOpen.get()}")
 
         // Verificar intervalo mínimo
         if (currentTime - lastCommandTime < MIN_COMMAND_INTERVAL) {
-            Log.d("CommandQueue", "❌ Intervalo mínimo no cumplido")
+            Log.d("CommandQueue", "⌚ Intervalo mínimo no cumplido")
             return
         }
 
-        // Solo verificar salud si NO está el monitor abierto
+        // Verificaciones básicas
         if (!isSerialMonitorOpen.get() && !verifyConnectionHealth()) {
-            Log.d("CommandQueue", "❌ Conexión no saludable - reintentando")
+            Log.d("CommandQueue", "⚠️ Conexión no saludable - reintentando")
             reconnectDevice()
             return
         }
@@ -615,29 +718,9 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
             return
         }
 
-        // Limpiar comandos duplicados de la cola
-        val queueSize = commandQueue.size
-        val iterator = commandQueue.iterator()
-        var removedCount = 0
-        while (iterator.hasNext()) {
-            if (iterator.next() == command) {
-                iterator.remove()
-                removedCount++
-            }
-        }
-
-        if (removedCount > 0) {
-            Log.d("CommandQueue", "🧹 Removidos $removedCount comandos duplicados de la cola")
-        }
-
-        // Encolar el nuevo comando
-        val offered = commandQueue.offer(command)
-
-        if (offered) {
-            Log.d("CommandQueue", "✅ Comando encolado exitosamente: $command (cola: ${commandQueue.size})")
-        } else {
-            Log.e("CommandQueue", "❌ Falló encolar comando: $command")
-        }
+        // CAMBIO CRÍTICO: Envío directo sin cola para evitar acumulación
+        Log.d("CommandQueue", "📤 ENVÍO DIRECTO (sin cola): $command")
+        sendCommandImmediate(command)
     }
 
     // Envía un comando inmediatamente al puerto USB, manejando errores de conexión.
@@ -661,27 +744,34 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                     return
                 }
 
-                // Preparar comando con terminador
                 val commandBytes = "${command}\n".toByteArray()
 
-                // Escribir con manejo de errores más permisivo
                 try {
                     currentPort.write(commandBytes, USB_WRITE_TIMEOUT)
                     success = true
 
-                    // Actualizar variables de estado SOLO si fue exitoso
                     lastSentCommand.set(command)
                     lastCommandTime = currentTime
 
-                    // LOG DE ÉXITO
-                    Log.d("CommandSystem", "✅ Comando enviado exitosamente: $command")
+                    Log.d("CommandSystem", "Comando enviado exitosamente: $command")
 
-                    // Actualizar UI solo si es necesario
-                    if (!isSerialMonitorOpen.get()) {
+                    // *** ÚNICO LUGAR DONDE SE REPRODUCE SONIDO ***
+                    // Solo para comandos válidos (no "N") y que estén configurados en AudioManager
+                    if (command != "N" && command.startsWith("C")) {
+                        try {
+                            // USAR LA NUEVA FUNCIÓN QUE EVITA DUPLICADOS
+                            audioManager.playCommandSoundOnce(command)
+                            Log.d("AudioSystem", "Solicitando audio ÚNICO para comando: $command")
+                        } catch (e: Exception) {
+                            Log.e("AudioSystem", "Error reproduciendo audio para $command: ${e.message}")
+                        }
+                    }
+
+                    // Solo mostrar toast para comandos importantes que NO sean "N"
+                    if (!isSerialMonitorOpen.get() && command != "N") {
                         runOnUiThread {
-                            // Solo mostrar toast para comandos importantes (no "N")
-                            if (command != "N") {
-                                showToastOnce("📤 Enviado: $command")
+                            if (command.startsWith("C")) {
+                                showToastOnce("Enviado: $command")
                             }
                         }
                     }
@@ -704,8 +794,7 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                         return
                     }
                 } else {
-                    // Solo mostrar error después de múltiples fallos SI NO está el monitor abierto
-                    Log.e("CommandSystem", "❌ Falló envío de $command después de $MAX_WRITE_RETRIES intentos")
+                    Log.e("CommandSystem", "Fallo envio de $command después de $MAX_WRITE_RETRIES intentos")
                     if (!isSerialMonitorOpen.get()) {
                         runOnUiThread {
                             showToastOnce("USB Error persistente - Verificar conexión")
@@ -727,8 +816,11 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
     // Configura el BroadcastReceiver para escuchar los eventos de permiso USB.
     private fun setupUsbReceiver() {
-        usbReceiver = UsbPermissionReceiver().apply { listener = this@MainActivity } // Crea una instancia y asigna el listener.
-        val filter = IntentFilter(ACTION_USB_PERMISSION) // Crea un filtro para la acción de permiso USB.
+        usbReceiver = UsbPermissionReceiver().apply {
+            listener = this@MainActivity
+        } // Crea una instancia y asigna el listener.
+        val filter =
+            IntentFilter(ACTION_USB_PERMISSION) // Crea un filtro para la acción de permiso USB.
         // Configura las flags para el registro del receiver, adaptándose a diferentes versiones de Android.
         val receiverFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             Context.RECEIVER_NOT_EXPORTED
@@ -739,11 +831,24 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
     }
 
     private fun connectToUsbDevice() {
-        val availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
+        var availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
 
         if (availableDrivers.isEmpty()) {
-            showToastOnce("❌ No hay dispositivos USB disponibles")
-            return
+            // Fallback: chips con VID/PID que no vienen en la tabla por defecto de la
+            // librería — como el WCH CH9102X, que usa el mismo protocolo que el CH340
+            // pero reporta un PID distinto (0x55D4 en vez de 0x7523).
+            Log.d(
+                "USB",
+                "Prober por defecto no encontró nada, probando tabla personalizada (CH9102X)..."
+            )
+            val customTable = com.hoho.android.usbserial.driver.ProbeTable()
+            customTable.addProduct(
+                0x1A86,
+                0x55D4,
+                com.hoho.android.usbserial.driver.Ch34xSerialDriver::class.java
+            ) // CH9102X
+            val customProber = UsbSerialProber(customTable)
+            availableDrivers = customProber.findAllDrivers(usbManager)
         }
 
         // LISTA AMPLIADA de dispositivos compatibles incluyendo ESP32
@@ -886,7 +991,11 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
     }
 
     // Inicializa la conexión USB serial con el driver y la conexión dados.
-    private fun initializeConnection(driver: UsbSerialDriver, usbConnection: UsbDeviceConnection, isESP32: Boolean = false) {
+    private fun initializeConnection(
+        driver: UsbSerialDriver,
+        usbConnection: UsbDeviceConnection,
+        isESP32: Boolean = false
+    ) {
         usbExecutor.execute {
             try {
                 // Cerrar conexiones previas
@@ -905,7 +1014,8 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                 port = driver.ports[0]
                 connection = usbConnection
 
-                val currentPort = port ?: throw IOException("No se pudo obtener el puerto del driver")
+                val currentPort =
+                    port ?: throw IOException("No se pudo obtener el puerto del driver")
 
                 // Abrir puerto
                 currentPort.open(usbConnection)
@@ -914,12 +1024,19 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                     throw IOException("El puerto no se abrió correctamente")
                 }
 
-                // CONFIGURACIÓN ESPECÍFICA PARA ESP32
+                // NUEVO: Logging detallado
+                val deviceType = if (isESP32) "ESP32" else "Arduino/Compatible"
+                Log.d("USBConnection", "Inicializando $deviceType...")
+
+                // CONFIGURACIÓN ESPECÍFICA
                 if (isESP32) {
                     initializeESP32(currentPort)
                 } else {
                     initializeArduino(currentPort)
                 }
+
+                // Verificación post-inicialización
+                Log.d("USBConnection", "Inicialización completada para $deviceType")
 
                 // Inicializar procesador de datos entrantes
                 startIncomingDataProcessor()
@@ -927,11 +1044,16 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                 isConnected.set(true)
                 lastSentCommand.set("")
                 currentDetection.set("")
-
+                // Limpiar filtro temporal para que reenvíe el comando actual al conectar
+                lastStableCommand.set("")
+                isDetectionStable.set(false)
+                currentStableDetection.set("")
+                detectionStartTime.set(0L)
+                stableCommandSentTime.set(0L)
+                synchronized(detectionWindowLock) { detectionWindow.clear() }
                 runOnUiThread {
-                    val deviceType = if (isESP32) "ESP32" else "Arduino"
-                    showToastOnce("⚡ $deviceType conectado - 115200 bps")
-                    updateStatusFast("✅ $deviceType conectado y verificado")
+                    showToastOnce("$deviceType conectado - 115200 bps")
+                    updateStatusFast("$deviceType conectado y limpio")
                 }
 
             } catch (e: IOException) {
@@ -942,7 +1064,7 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
                 runOnUiThread {
                     showToastOnce("Error conexión: ${e.message}")
-                    updateStatusFast("❌ Error: ${e.message}")
+                    updateStatusFast("Error: ${e.message}")
                 }
             } catch (e: Exception) {
                 isConnected.set(false)
@@ -985,17 +1107,74 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         }
 
         // Limpiar buffers múltiples veces para ESP32
-        repeat(5) {
+        repeat(3) {
             try {
                 port.purgeHwBuffers(true, true)
-                Thread.sleep(100)
-            } catch (e: Exception) {
-                // Ignorar si no es compatible
-            }
+                Thread.sleep(60)
+            } catch (e: Exception) { }
         }
+
+
+        // MODIFICADO: Usar función unificada
+        clearInitialDeviceData(port)
 
         // ESP32 necesita más tiempo para estar listo
         Thread.sleep(ESP32_SETUP_DELAY)
+    }
+
+    // Nueva función para limpiar datos iniciales problemáticos
+    private fun clearInitialDeviceData(port: UsbSerialPort) {
+        try {
+            val clearBuffer = ByteArray(1024)
+            val startTime = System.currentTimeMillis()
+            var totalBytesCleared = 0
+            var consecutiveEmptyReads = 0
+            val maxConsecutiveEmpty = 3          // ← corta después de 3 lecturas vacías seguidas (~600ms)
+            val maxWindow = 1500L                // ← techo de seguridad, antes 3000L
+
+            Log.d("DeviceInit", "Iniciando limpieza de datos basura...")
+
+            while (System.currentTimeMillis() - startTime < maxWindow) {
+                try {
+                    val bytesRead = port.read(clearBuffer, 100)
+                    if (bytesRead <= 0) {
+                        consecutiveEmptyReads++
+                        if (consecutiveEmptyReads >= maxConsecutiveEmpty) {
+                            Log.d("DeviceInit", "Buffer limpio confirmado, saliendo antes de tiempo")
+                            break
+                        }
+                        Thread.sleep(200)
+                        continue
+                    }
+
+                    consecutiveEmptyReads = 0
+                    totalBytesCleared += bytesRead
+
+                    val hasProblematicData = clearBuffer.take(bytesRead).any { byte ->
+                        val unsignedByte = byte.toInt() and 0xFF
+                        unsignedByte == 0x00 || unsignedByte == 0xFF
+                    }
+
+                    if (hasProblematicData) {
+                        Log.d("DeviceInit", "Encontrados datos problemáticos en $bytesRead bytes, continuando limpieza...")
+                    } else {
+                        Log.d("DeviceInit", "Limpiando $bytesRead bytes de datos iniciales normales")
+                    }
+
+                } catch (e: Exception) {
+                    break
+                }
+            }
+
+            Log.d("DeviceInit", "Limpieza completada. Total bytes descartados: $totalBytesCleared")
+
+            synchronized(incomingDataBuffer) {
+                incomingDataBuffer.clear()
+            }
+
+        } catch (e: Exception) {
+            Log.w("DeviceInit", "Error limpiando datos iniciales: ${e.message}")
+        }
     }
 
     private fun initializeArduino(port: UsbSerialPort) {
@@ -1034,21 +1213,26 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
             }
         }
 
+        // Limpiar datos basura iniciales (mismo que ESP32)
+        clearInitialDeviceData(port)
+
         // Esperar que Arduino complete su reset/inicialización
-        Thread.sleep(1000)
+        Thread.sleep(600)
     }
+
 
     private fun startIncomingDataProcessor() {
         incomingDataProcessor?.shutdownNow()
 
         incomingDataProcessor = Executors.newSingleThreadExecutor { r ->
             Thread(r, "IncomingDataProcessor").apply {
-                priority = Thread.NORM_PRIORITY // Prioridad normal, no máxima
+                priority = Thread.NORM_PRIORITY
             }
         }
 
         incomingDataProcessor?.execute {
             val buffer = ByteArray(INCOMING_DATA_BUFFER_SIZE)
+            var consecutiveErrors = 0
 
             while (isConnected.get() && !Thread.currentThread().isInterrupted) {
                 try {
@@ -1062,20 +1246,34 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                     val bytesRead = currentPort.read(buffer, USB_READ_TIMEOUT)
 
                     if (bytesRead > 0) {
-                        val receivedData = String(buffer, 0, bytesRead)
-                        processIncomingData(receivedData)
-                        lastIncomingDataTime = System.currentTimeMillis()
+                        // NUEVO: Convertir bytes a string de forma más segura
+                        val receivedData = convertBytesToSafeString(buffer, bytesRead)
+
+                        if (receivedData.isNotEmpty()) {
+                            processIncomingData(receivedData)
+                            lastIncomingDataTime = System.currentTimeMillis()
+                            consecutiveErrors = 0 // Reset contador de errores
+                        }
                     } else {
                         // Sleep más largo cuando no hay datos
                         Thread.sleep(10)
                     }
 
                 } catch (e: IOException) {
-                    if (isConnected.get()) {
-                        // Error de lectura - no reconectar inmediatamente
+                    consecutiveErrors++
+                    if (isConnected.get() && consecutiveErrors < 10) {
                         Thread.sleep(100)
+                    } else if (consecutiveErrors >= 10) {
+                        Log.w("IncomingData", "Muchos errores consecutivos, limpiando buffer")
+                        // Limpiar buffer después de muchos errores
+                        synchronized(incomingDataBuffer) {
+                            incomingDataBuffer.clear()
+                        }
+                        consecutiveErrors = 0
+                        Thread.sleep(1000)
                     }
                 } catch (e: Exception) {
+                    Log.e("IncomingData", "Error inesperado: ${e.message}")
                     if (isConnected.get()) {
                         Thread.sleep(50)
                     }
@@ -1084,11 +1282,56 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         }
     }
 
+    private fun convertBytesToSafeString(buffer: ByteArray, length: Int): String {
+        val result = StringBuilder()
+
+        for (i in 0 until length) {
+            val byte = buffer[i].toInt() and 0xFF
+
+            when (byte) {
+                // Caracteres válidos: imprimibles, espacios, tabs, saltos de línea
+                in 9..13, in 32..126 -> {
+                    result.append(byte.toChar())
+                }
+                // Ignorar caracteres de control y datos binarios
+                0, 255 -> {
+                    Log.d(
+                        "SafeString",
+                        "Ignorando byte problemático: 0x${byte.toString(16).uppercase()}"
+                    )
+                    // No agregar nada, simplemente ignorar
+                }
+
+                else -> {
+                    // Otros caracteres de control, convertir a espacio o ignorar
+                    if (byte < 32) {
+                        Log.d(
+                            "SafeString",
+                            "Ignorando carácter de control: 0x${byte.toString(16).uppercase()}"
+                        )
+                    } else {
+                        result.append('?') // Reemplazar caracteres raros con ?
+                    }
+                }
+            }
+        }
+
+        return result.toString()
+    }
+
+
     private fun processIncomingData(data: String) {
         try {
+            // NUEVO: Filtrar caracteres binarios problemáticos
+            val cleanData = filterBinaryData(data)
+            if (cleanData.isEmpty()) {
+                Log.d("IncomingData", "Datos binarios filtrados, ignorando")
+                return
+            }
+
             // Agregar datos al buffer
             synchronized(incomingDataBuffer) {
-                incomingDataBuffer.append(data)
+                incomingDataBuffer.append(cleanData)
 
                 // Procesar líneas completas
                 val content = incomingDataBuffer.toString()
@@ -1105,7 +1348,7 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
                 for (line in completedLines) {
                     val cleanLine = line.trim()
-                    if (cleanLine.isNotEmpty()) {
+                    if (cleanLine.isNotEmpty() && isValidTextData(cleanLine)) {
                         // NUEVO: Guardar último mensaje con timestamp
                         lastReceivedMessage = cleanLine
                         lastMessageTime = System.currentTimeMillis()
@@ -1118,9 +1361,80 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                 }
             }
         } catch (e: Exception) {
-            // Ignorar errores de procesamiento
+            Log.e("IncomingData", "Error procesando datos: ${e.message}")
+            // NUEVO: Limpiar buffer en caso de error
+            synchronized(incomingDataBuffer) {
+                incomingDataBuffer.clear()
+            }
         }
     }
+
+    private fun filterBinaryData(data: String): String {
+        val result = StringBuilder()
+        val lines = data.split('\n', '\r')
+
+        for (line in lines) {
+            val cleanLine = line.filter { char ->
+                // Permitir solo caracteres imprimibles, espacios, tabs, y saltos de línea
+                char.code in 9..13 || char.code in 32..126
+            }.trim()
+
+            // Solo agregar líneas que pasen la validación
+            if (cleanLine.isNotEmpty() && isValidTextData(cleanLine)) {
+                result.append(cleanLine).append('\n')
+            }
+        }
+
+        return result.toString()
+    }
+
+
+    // Agregar esta función para validar datos de texto
+    private fun isValidTextData(data: String): Boolean {
+        // Rechazar strings que parezcan datos binarios
+        if (data.length < 2) return false
+
+        // Rechazar strings con muchos caracteres de control
+        val controlChars = data.count { it.code < 32 && it.code !in 9..13 }
+        if (controlChars > data.length / 4) return false
+
+        // NUEVO: Lista ampliada de patrones problemáticos
+        val problematicPatterns = listOf(
+            "0x",           // Datos hexadecimales
+            "entry",        // Mensaje problemático que acompaña a 0x
+            "Entry",        // Variante con mayúscula
+            "ENTRY",        // Variante en mayúsculas
+            "rst:0x",       // Reset con código hex
+            "boot:0x",      // Boot con código hex
+            "mode:0x",      // Mode con código hex
+            "flash read err",     // Error de flash
+            "ets_main.c",         // Archivo de sistema
+            "user code done"      // Mensaje de sistema
+        )
+
+        // Rechazar si contiene algún patrón problemático
+        for (pattern in problematicPatterns) {
+            if (data.contains(pattern, ignoreCase = true)) {
+                Log.d("BinaryFilter", "Rechazando datos problemáticos: $data (patrón: $pattern)")
+                return false
+            }
+        }
+
+        // Rechazar patrones típicos de datos binarios o de sistema
+        if (data.matches(Regex("^[0-9A-Fa-f]+$")) && data.length > 4) {
+            Log.d("BinaryFilter", "Rechazando datos hexadecimales puros: $data")
+            return false
+        }
+
+        // Rechazar mensajes que parecen de boot/sistema del microcontrolador
+        if (data.matches(Regex(".*\\b(rst|boot|mode|flash):\\s*0x.*", RegexOption.IGNORE_CASE))) {
+            Log.d("BinaryFilter", "Rechazando mensaje de sistema: $data")
+            return false
+        }
+
+        return true
+    }
+
 
     private fun updateStatusWithArduinoMessage(message: String) {
         // Mostrar el mensaje de Arduino en el status
@@ -1192,9 +1506,13 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                     cameraSelector,
                     imageAnalyzer
                 )
+                this.camera = camera
 
                 if (camera.cameraInfo.hasFlashUnit()) {
-                    camera.cameraControl.enableTorch(true)
+                    // Restaurar estado de linterna guardado en ConfigSettings
+                    val savedTorch = ConfigSettings.torchEnabled
+                    isTorchOn.set(savedTorch)
+                    camera.cameraControl.enableTorch(savedTorch)
                 }
 
             } catch (exc: Exception) {
@@ -1226,8 +1544,17 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
     // Procesa la detección de inmediato, decidiendo qué comando de pilar enviar.
 
-    private fun processDetectionImmediate(result: String, area: Double, centerX: Float, centerY: Float, imageWidth: Int, imageHeight: Int) {
-        if (!isConnected.get() || area < MIN_AREA_THRESHOLD) {
+    private fun processDetectionImmediate(
+        result: String,
+        area: Double,
+        centerX: Float,
+        centerY: Float,
+        imageWidth: Int,
+        imageHeight: Int
+    ) {
+        // Sin objeto: alimentar ventana con "N" para que el filtro funcione correctamente
+        if (area < MIN_AREA_THRESHOLD) {
+            processCommandWithTemporalFilter("N", "NONE")
             return
         }
 
@@ -1238,7 +1565,7 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
             Log.d("CommandSystem", "=== MODO DUAL ACTIVADO ===")
             Log.d("CommandSystem", "Detectados 2 objetos - Usando solo lógica dual")
             processDualObjectDetection(dualDetection)
-            return // CRÍTICO: Salir aquí para evitar procesamiento individual
+            return
         }
 
         // Solo procesar objeto único si NO hay detección dual
@@ -1248,7 +1575,6 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
             processSingleObjectDetection(dualDetection.primaryObject!!)
         }
     }
-
 
     private fun processSingleObjectDetection(objectPos: ObjectPosition) {
         try {
@@ -1260,13 +1586,16 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                 objectPos.imageHeight
             )
 
-            val (command, commandInfo) = CommandManager.determineCommandSafe(
-                objectPos.color,
-                orientation,
-                distance
-            )
+            val (command, commandInfo) = if (CommandManager.parkingModeActive) {
+                CommandManager.determineParkingCommand(objectPos.color, orientation, distance)
+            } else {
+                CommandManager.determineCommandSafe(objectPos.color, orientation, distance)
+            }
 
-            Log.d("SingleObject", "Objeto único: ${objectPos.color} | $orientation | ${distance}cm -> $command")
+            Log.d(
+                "SingleObject",
+                "Objeto único: ${objectPos.color} | $orientation | ${distance}cm -> $command"
+            )
 
             // APLICAR FILTRO TEMPORAL
             processCommandWithTemporalFilter(command, "SIMPLE")
@@ -1291,14 +1620,28 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                 secondary.centerX, secondary.centerY, secondary.imageWidth, secondary.imageHeight
             )
 
-            val (command, commandInfo) = CommandManager.determineDualObjectCommand(
-                primary.color, primaryOrientation, primaryDistance,
-                secondary.color, secondaryOrientation, secondaryDistance
-            )
+            val (command, commandInfo) = if (CommandManager.parkingModeActive) {
+                CommandManager.determineParkingDualCommand(
+                    primary.color, primaryOrientation, primaryDistance,
+                    secondary.color, secondaryOrientation, secondaryDistance
+                )
+            } else {
+                CommandManager.determineDualObjectCommand(
+                    primary.color, primaryOrientation, primaryDistance,
+                    secondary.color, secondaryOrientation, secondaryDistance
+                )
+            }
+
 
             Log.d("DualObject", "=== COMANDO DUAL DETECTADO ===")
-            Log.d("DualObject", "Primario: ${primary.color}($primaryOrientation,${primaryDistance}cm)")
-            Log.d("DualObject", "Secundario: ${secondary.color}($secondaryOrientation,${secondaryDistance}cm)")
+            Log.d(
+                "DualObject",
+                "Primario: ${primary.color}($primaryOrientation,${primaryDistance}cm)"
+            )
+            Log.d(
+                "DualObject",
+                "Secundario: ${secondary.color}($secondaryOrientation,${secondaryDistance}cm)"
+            )
             Log.d("DualObject", "COMANDO FINAL: $command")
             Log.d("DualObject", "INFO: $commandInfo")
 
@@ -1311,72 +1654,116 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
     }
 
 
-
     /**
      * FILTRO TEMPORAL PARA ESTABILIZAR DETECCIONES
      * Solo envía comandos después de que se mantengan estables por DETECTION_STABILITY_TIME
      */
     private fun processCommandWithTemporalFilter(command: String, detectionType: String) {
+        if (command == "N") {
+            lastFrameTime.set(0L)
+            Log.d("TemporalFilter", "COMANDO 'N' - reseteando ventana")
+            synchronized(detectionWindowLock) { detectionWindow.clear() }
+            currentStableDetection.set("")
+            detectionStartTime.set(0L)
+            isDetectionStable.set(false)
+            lastStableCommand.set("")
+            currentDetection.set(command)
+            lastDetectionTime = System.currentTimeMillis()
+            sendCommandImmediate(command)
+            return
+        }
+
         temporalFilterExecutor.execute {
             val currentTime = System.currentTimeMillis()
-            val currentStableCmd = currentStableDetection.get()
+            val lastFrame = lastFrameTime.get()
+            if (lastFrame > 0L && (currentTime - lastFrame) > MAX_FRAME_GAP_MS) {
+                Log.d("TemporalFilter", "Gap detectado: ${currentTime - lastFrame}ms — reseteando timer")
+                currentStableDetection.set("")
+                detectionStartTime.set(0L)
+                synchronized(detectionWindowLock) { detectionWindow.clear() }
+            }
+            lastFrameTime.set(currentTime)
 
-            Log.d("TemporalFilter", "=== FILTRO TEMPORAL ===")
-            Log.d("TemporalFilter", "Comando detectado: $command ($detectionType)")
-            Log.d("TemporalFilter", "Comando estable actual: $currentStableCmd")
+            // Agregar frame actual a la ventana deslizante
+            synchronized(detectionWindowLock) {
+                detectionWindow.addLast(command)
+                while (detectionWindow.size > DETECTION_WINDOW_SIZE) {
+                    detectionWindow.removeFirst()
+                }
+            }
 
-            // CASO 1: Es el mismo comando que ya se está estabilizando
-            if (command == currentStableCmd) {
+            // Si ya se envió un comando estable, esperar a que expire para permitir reenvío
+            if (isDetectionStable.get()) {
+                val timeSinceSent = currentTime - stableCommandSentTime.get()
+                if (timeSinceSent < STABLE_STATE_EXPIRY_TIME) {
+                    // Aún dentro del período de bloqueo — no reenviar
+                    return@execute
+                }
+                // Expiró — limpiar todo para permitir nuevo ciclo de estabilización
+                Log.d("TemporalFilter", "Estado estable expirado (${timeSinceSent}ms) — reseteando para reenvío")
+                isDetectionStable.set(false)
+                currentStableDetection.set("")
+                detectionStartTime.set(0L)
+                lastStableCommand.set("")
+                synchronized(detectionWindowLock) { detectionWindow.clear() }
+            }
+
+
+            // Calcular comando dominante en la ventana
+            val windowSnapshot = synchronized(detectionWindowLock) { detectionWindow.toList() }
+            if (windowSnapshot.size < DETECTION_WINDOW_SIZE) {
+                if (command != currentStableDetection.get()) {
+                    currentStableDetection.set(command)
+                    detectionStartTime.set(currentTime)
+                }
+                Log.d("TemporalFilter", "Llenando ventana: ${windowSnapshot.size}/$DETECTION_WINDOW_SIZE — cmd=$command")
+                return@execute
+            }
+
+            // Contar votos por comando en la ventana
+            val votes = windowSnapshot.groupingBy { it }.eachCount()
+            val dominantCmd = votes.maxByOrNull { it.value }?.key ?: command
+            val dominantRatio = (votes[dominantCmd] ?: 0).toDouble() / windowSnapshot.size
+
+            Log.d("TemporalFilter", "Ventana: $votes | dominante=$dominantCmd (${"%.0f".format(dominantRatio * 100)}%) umbral=${(DETECTION_MAJORITY_RATIO * 100).toInt()}%")
+
+            if (dominantRatio >= DETECTION_MAJORITY_RATIO) {
+                if (dominantCmd != currentStableDetection.get()) {
+                    currentStableDetection.set(dominantCmd)
+                    detectionStartTime.set(currentTime)
+                    Log.d("TemporalFilter", "Nuevo dominante: $dominantCmd — iniciando timer")
+                    return@execute
+                }
+
                 val elapsedTime = currentTime - detectionStartTime.get()
-                Log.d("TemporalFilter", "Comando consistente - Tiempo transcurrido: ${elapsedTime}ms")
+                Log.d("TemporalFilter", "Dominante $dominantCmd: ${elapsedTime}ms / ${DETECTION_STABILITY_TIME}ms")
 
-                // Si ya pasó el tiempo de estabilidad y no se ha enviado aún
                 if (elapsedTime >= DETECTION_STABILITY_TIME && !isDetectionStable.get()) {
                     isDetectionStable.set(true)
-
-                    Log.d("TemporalFilter", "✅ COMANDO ESTABLE ALCANZADO: $command")
-
-                    // Solo enviar si es diferente al último comando estable enviado
-                    if (command != lastStableCommand.get()) {
-                        lastStableCommand.set(command)
-                        currentDetection.set(command)
-                        lastDetectionTime = currentTime
-
-                        Log.d("TemporalFilter", "🚀 ENVIANDO COMANDO ESTABLE: $command")
-                        queueCommand(command)
-
-                        runOnUiThread {
-                            showToastOnce("✅ Comando estable: $command")
-                        }
-                    } else {
-                        Log.d("TemporalFilter", "⚠️ Comando ya enviado previamente: $command")
-                    }
-                } else if (!isDetectionStable.get()) {
-                    Log.d("TemporalFilter", "⏳ Esperando estabilidad... ${elapsedTime}ms / ${DETECTION_STABILITY_TIME}ms")
+                    lastStableCommand.set(dominantCmd)
+                    stableCommandSentTime.set(currentTime)
+                    currentDetection.set(dominantCmd)
+                    lastDetectionTime = currentTime
+                    Log.d("TemporalFilter", "ESTABLE POR VOTACIÓN — ENVIANDO: $dominantCmd")
+                    sendCommandImmediate(dominantCmd)
+                }
+            } else {
+                Log.d("TemporalFilter", "Sin mayoría: $dominantCmd solo ${"%.0f".format(dominantRatio * 100)}% — esperando")
+                if (dominantCmd != currentStableDetection.get()) {
+                    currentStableDetection.set(dominantCmd)
+                    detectionStartTime.set(currentTime)
                 }
             }
-            // CASO 2: Es un comando diferente al que se está estabilizando
-            else {
-                Log.d("TemporalFilter", "🔄 NUEVO COMANDO DETECTADO: $command (anterior: $currentStableCmd)")
 
-                // Reiniciar el proceso de estabilización
-                currentStableDetection.set(command)
-                detectionStartTime.set(currentTime)
-                isDetectionStable.set(false)
-
-                Log.d("TemporalFilter", "⏱️ Iniciando periodo de estabilización para: $command")
-
-                runOnUiThread {
-                    showToastOnce("⏳ Estabilizando: $command")
-                }
             }
         }
-    }
+
 
     // Muestra información de calibración (área y distancia calculada) en un Toast.
     private fun showCalibrationInfo(area: Double) {
         val distance = calculateDistance(area) // Calcula la distancia para la calibración.
-        val debugText = "🔧 CALIBRACIÓN:\nÁrea actual: ${area.toInt()}\nDistancia calculada: ${distance}cm"
+        val debugText =
+            "🔧 CALIBRACIÓN:\nÁrea actual: ${area.toInt()}\nDistancia calculada: ${distance}cm"
 
         runOnUiThread {
             showToastOnce(debugText) // Muestra el mensaje de calibración.
@@ -1384,7 +1771,13 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
     }
 
     // Actualiza la interfaz de usuario de forma optimizada.
-    private fun updateUIOptimized(result: String, bitmap: Bitmap?, area: Double, distance: Int, orientation: String) {
+    private fun updateUIOptimized(
+        result: String,
+        bitmap: Bitmap?,
+        area: Double,
+        distance: Int,
+        orientation: String
+    ) {
         // Actualizar cada pocos frames para no sobrecargar la UI y mantener la fluidez.
         if (System.currentTimeMillis() % 3 == 0L) {
             val lastCmd = lastSentCommand.get()
@@ -1404,11 +1797,12 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
             }
 
             //Preservar mensaje de Arduino si es reciente
-            val statusText = if (currentTime - lastMessageTime < MESSAGE_DISPLAY_DURATION && lastReceivedMessage.isNotEmpty()) {
-                "$mainStatusText\nArduino: $lastReceivedMessage"
-            } else {
-                mainStatusText
-            }
+            val statusText =
+                if (currentTime - lastMessageTime < MESSAGE_DISPLAY_DURATION && lastReceivedMessage.isNotEmpty()) {
+                    "$mainStatusText\nArduino: $lastReceivedMessage"
+                } else {
+                    mainStatusText
+                }
 
             tvStatus.text = statusText
         }
@@ -1440,7 +1834,7 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
         // Configurar el pincel para la línea de división
         val paint = Paint().apply {
-            color = Color.RED
+            color = Color.YELLOW
             strokeWidth = 4f
             style = Paint.Style.STROKE
             isAntiAlias = true
@@ -1463,21 +1857,61 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
 
     // Muestra un Toast, cancelando el anterior si existía para evitar acumulación.
     private fun showToastOnce(message: String) {
-        toast?.cancel() // Cancela cualquier Toast previo.
-        toast = Toast.makeText(this, message, Toast.LENGTH_SHORT) // Crea un nuevo Toast.
-        toast?.show() // Muestra el Toast.
+        // No mostrar toast para:
+        // - Comando "N"
+        // - Mensajes de estabilización
+        // - Comandos estables
+        if (message.contains("N") && message.contains("Enviado:") ||
+            message.contains("Estabilizando:") ||
+            message.contains("Comando estable:")
+        ) {
+            return
+        }
+
+        val currentTime = System.currentTimeMillis()
+
+        toast?.cancel()
+        pendingToastRunnable?.let { handler.removeCallbacks(it) }
+
+        if (currentTime - lastToastTime < TOAST_COOLDOWN) {
+            val delay = TOAST_COOLDOWN - (currentTime - lastToastTime)
+            pendingToastRunnable = Runnable {
+                toast = Toast.makeText(this, message, Toast.LENGTH_SHORT)
+                toast?.show()
+                lastToastTime = System.currentTimeMillis()
+            }
+            handler.postDelayed(pendingToastRunnable!!, delay)
+        } else {
+            toast = Toast.makeText(this, message, Toast.LENGTH_SHORT)
+            toast?.show()
+            lastToastTime = currentTime
+        }
     }
+
 
     // Verifica si todos los permisos requeridos han sido concedidos.
     private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
         ContextCompat.checkSelfPermission(baseContext, it) == PackageManager.PERMISSION_GRANTED
     }
 
+
+
+    private fun showSettingsDialog() {
+        val settingsManager = SettingsDialogManager(this)
+        settingsManager.showMainSettingsDialog {
+            // Callback cuando se actualiza alguna configuración
+            showToastOnce("Configuración actualizada - Los cambios se aplican inmediatamente")
+        }
+    }
+
     // Callback llamado cuando se concede el permiso USB.
     override fun onPermissionGranted() {
         pendingDriver?.let { driver ->
             usbManager.openDevice(driver.device)?.let { usbConnection ->
-                initializeConnection(driver, usbConnection) // Inicializa la conexión con el driver y conexión.
+                initializeConnection(
+                    driver,
+                    usbConnection
+                ) // Inicializa la conexión con el driver y conexión.
             }
         }
         pendingDriver = null // Limpia el driver pendiente.
@@ -1513,6 +1947,8 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         // Limpiar instancia estática
         instance = null
 
+        pendingToastRunnable?.let { handler.removeCallbacks(it) }
+
         try {
             wakeLock?.release()
         } catch (e: Exception) {
@@ -1527,7 +1963,7 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         cameraExecutor.shutdown() // Apaga el executor de la cámara.
         usbExecutor.shutdown() // Apaga el executor USB.
         temporalFilterExecutor.shutdownNow()
-
+        audioManager.release()
         isConnected.set(false) // Marca la conexión como inactiva.
 
         // Cierra el puerto y la conexión USB en un nuevo hilo para evitar bloqueos en el hilo principal.
@@ -1547,7 +1983,9 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
         } catch (e: IllegalArgumentException) {
             // Ignora la excepción si el receiver ya había sido desregistrado
         }
+
     }
+
     override fun onResume() {
         super.onResume()
 
@@ -1580,16 +2018,25 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
     }
 
     private fun updateUIOptimizedDual(result: String, bitmap: Bitmap?, dualDetection: DualObjectDetection) {
+
+
         if (System.currentTimeMillis() % 3 == 0L) {
+
+
+
             val lastCmd = lastSentCommand.get()
             val currentTime = System.currentTimeMillis()
 
             val statusText = buildString {
                 // VERIFICAR SI HAY DETECCIÓN DUAL PRIMERO
+                // Indicador de modo estacionamiento
+                if (CommandManager.parkingModeActive) {
+                    append("🟣 MODO ESTACIONAMIENTO ACTIVO\n")
+                }
+
                 if (dualDetection.primaryObject != null && dualDetection.secondaryObject != null) {
                     // MODO DUAL - Mostrar información del comando combinado
                     append("🔥 DETECCIÓN DUAL ACTIVA 🔥\n")
-
                     val primary = dualDetection.primaryObject!!
                     val secondary = dualDetection.secondaryObject!!
 
@@ -1604,10 +2051,18 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                     )
 
                     // Obtener comando dual
-                    val (dualCommand, dualCommandInfo) = CommandManager.determineDualObjectCommand(
-                        primary.color, primaryOrientation, primaryDistance,
-                        secondary.color, secondaryOrientation, secondaryDistance
-                    )
+                    val (dualCommand, dualCommandInfo) = if (CommandManager.parkingModeActive) {
+                        CommandManager.determineParkingDualCommand(
+                            primary.color, primaryOrientation, primaryDistance,
+                            secondary.color, secondaryOrientation, secondaryDistance
+                        )
+                    } else {
+                        CommandManager.determineDualObjectCommand(
+                            primary.color, primaryOrientation, primaryDistance,
+                            secondary.color, secondaryOrientation, secondaryDistance
+                        )
+                    }
+
 
                     append("COMANDO DUAL: $dualCommand\n")
                     append("INFO: $dualCommandInfo\n")
@@ -1624,13 +2079,25 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                         val orientation = CommandManager.calculateOrientation(
                             primary.centerX, primary.centerY, primary.imageWidth, primary.imageHeight
                         )
-                        val (command, _) = CommandManager.determineCommandSafe(primary.color, orientation, distance)
+                        val (command, _) = if (CommandManager.parkingModeActive) {
+                            CommandManager.determineParkingCommand(primary.color, orientation, distance)
+                        } else {
+                            CommandManager.determineCommandSafe(primary.color, orientation, distance)
+                        }
                         val positionText = if(orientation == "L") "Izq" else if(orientation == "R") "Der" else "Centro"
 
                         append("\n🎯 ${primary.color} | ${distance}cm | $positionText")
+
+// Mostrar explícitamente si el lado real fue forzado por descarte (estacionamiento)
+                        if (CommandManager.parkingModeActive && CommandManager.parkingSide != null) {
+                            val ladoForzado = if (CommandManager.parkingSide == "L") "Der" else "Izq"
+                            append(" → forzado: $ladoForzado (estacionamiento en ${if(CommandManager.parkingSide == "L") "Izq" else "Der"})")
+                        }
+
                         if (command != "N") {
                             append(" | CMD: $command")
                         }
+
                     }
                 }
 
@@ -1648,13 +2115,32 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
                 val currentStableCmd = currentStableDetection.get()
                 if (currentStableCmd.isNotEmpty()) {
                     val elapsedTime = currentTime - detectionStartTime.get()
-                    val progress = (elapsedTime * 100 / DETECTION_STABILITY_TIME).coerceAtMost(100)
-                    append("\n⏳ Estabilizando: $currentStableCmd (${progress}%)")
+                    val windowSnapshot = synchronized(detectionWindowLock) { detectionWindow.toList() }
+                    val votes = windowSnapshot.groupingBy { it }.eachCount()
+                    val dominant = votes.maxByOrNull { it.value }
+                    val ratio = if (windowSnapshot.isNotEmpty()) ((dominant?.value ?: 0) * 100 / windowSnapshot.size) else 0
 
+                    append("\n⏳ Estabilizando: $currentStableCmd ($ratio%)")
                     if (isDetectionStable.get()) {
                         append(" ✅ ESTABLE")
                     } else {
-                        append(" ⏱️ ${DETECTION_STABILITY_TIME - elapsedTime}ms restantes")
+                        val elapsedPct = (elapsedTime * 100 / DETECTION_STABILITY_TIME).coerceAtMost(100)
+                        append(" ⏱️ ${elapsedPct}%")
+                    }
+                }
+
+                // OBJETOS RECHAZADOS — máximo 2 para no saturar la pantalla
+                val rejected = ColorAnalyzer.lastRejectedObjects
+                if (rejected.isNotEmpty()) {
+                    append("\n─────────────────")
+                    rejected.take(2).forEach { r ->
+                        val emoji = when (r.color) {
+                            "Rojo" -> "🔴"
+                            "Verde" -> "🟢"
+                            "Magenta" -> "🟣"
+                            else -> "⚪"
+                        }
+                        append("\n$emoji ✗ ${r.color} ${r.area.toInt()}px — ${r.reason}")
                     }
                 }
 
@@ -1692,12 +2178,21 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
             detection.primaryObject?.let { obj ->
                 // CORRECCIÓN: Llamar a CommandManager directamente
                 val distance = CommandManager.calculateDistance(obj.area)
-                val orientation = CommandManager.calculateOrientation(obj.centerX, obj.centerY, obj.imageWidth, obj.imageHeight)
-                val (command, commandInfo) = CommandManager.determineCommandSafe(obj.color, orientation, distance)
+                val orientation = CommandManager.calculateOrientation(
+                    obj.centerX,
+                    obj.centerY,
+                    obj.imageWidth,
+                    obj.imageHeight
+                )
+                val (command, commandInfo) = CommandManager.determineCommandSafe(
+                    obj.color,
+                    orientation,
+                    distance
+                )
 
                 append("🎯 OBJETO PRIMARIO:\n")
                 append("Color: ${obj.color}\n")
-                append("Posición: ${if(orientation == "L") "Izquierda" else "Derecha"}\n")
+                append("Posición: ${if (orientation == "L") "Izquierda" else "Derecha"}\n")
                 append("Distancia: ${distance}cm\n")
                 append("Comando: $command\n")
                 append("Info: $commandInfo\n")
@@ -1707,12 +2202,22 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
             detection.secondaryObject?.let { obj ->
                 // CORRECCIÓN: Llamar a CommandManager directamente
                 val distance = CommandManager.calculateDistance(obj.area)
-                val orientation = CommandManager.calculateOrientation(obj.centerX, obj.centerY, obj.imageWidth, obj.imageHeight)
-                val (command, commandInfo) = CommandManager.determineCommandSafe(obj.color, orientation, distance)
+                val orientation = CommandManager.calculateOrientation(
+                    obj.centerX,
+                    obj.centerY,
+                    obj.imageWidth,
+                    obj.imageHeight
+                )
+
+                val (command, commandInfo) = CommandManager.determineCommandSafe(
+                    obj.color,
+                    orientation,
+                    distance
+                )
 
                 append("🔸 OBJETO SECUNDARIO:\n")
                 append("Color: ${obj.color}\n")
-                append("Posición: ${if(orientation == "L") "Izquierda" else "Derecha"}\n")
+                append("Posición: ${if (orientation == "L") "Izquierda" else "Derecha"}\n")
                 append("Distancia: ${distance}cm\n")
                 append("Comando: $command\n")
                 append("Info: $commandInfo\n")
@@ -1739,11 +2244,14 @@ class MainActivity : AppCompatActivity(), UsbPermissionReceiver.UsbPermissionLis
             append("Tiempo transcurrido: ${elapsedTime}ms\n")
             append("Es estable: ${isDetectionStable.get()}\n")
             append("Último comando estable: ${lastStableCommand.get().ifEmpty { "Ninguno" }}\n")
-            append("Progreso: ${if (currentStableDetection.get().isNotEmpty())
-                "${(elapsedTime * 100 / DETECTION_STABILITY_TIME).coerceAtMost(100)}%" else "0%"}")
+            append("Progreso: ${
+                if (currentStableDetection.get().isNotEmpty())
+                    "${(elapsedTime * 100 / DETECTION_STABILITY_TIME).coerceAtMost(100)}%" else "0%"
+            }")
         }
     }
 
 
-}
 
+
+}

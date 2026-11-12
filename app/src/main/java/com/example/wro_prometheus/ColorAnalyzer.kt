@@ -16,7 +16,7 @@ import android.graphics.Matrix
 import kotlin.math.*
 
 /**
- * Analizador de colores que detecta objetos de colores específicos (rojo, verde, magenta)
+ * Analizador de colores que detecta objetos de co lores específicos (rojo, verde, magenta)
  * usando OpenCV y técnicas avanzadas de procesamiento de imágenes.
  *
  * Características principales:
@@ -26,13 +26,13 @@ import kotlin.math.*
  * - Detección de picos triangulares para rechazar formas orgánicas
  *
  * @param callback Función que recibe los resultados del análisis con parámetros:
- *                 - String: Descripción del color detectado
- *                 - Bitmap?: Imagen procesada con contornos dibujados
- *                 - Double: Área del objeto detectado
- *                 - Float: Coordenada X del centro del objeto
- *                 - Float: Coordenada Y del centro del objeto
- *                 - Int: Ancho de la imagen procesada
- *                 - Int: Alto de la imagen procesada
+ * - String: Descripción del color detectado
+ * - Bitmap?: Imagen procesada con contornos dibujados
+ * - Double: Área del objeto detectado
+ * - Float: Coordenada X del centro del objeto
+ * - Float: Coordenada Y del centro del objeto
+ * - Int: Ancho de la imagen procesada
+ * - Int: Alto de la imagen procesada
  */
 class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection) -> Unit) : ImageAnalysis.Analyzer {
 
@@ -63,18 +63,68 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
         // Variable estática para detección dual
         var lastDualDetection = DualObjectDetection(null, null)
 
+        /**
+         * Muestra de color promedio (HSV) del interior del último objeto primario detectado.
+         * La usa la ventana de calibración por muestras para promediar el Hue real de los
+         * objetos en distintos puntos de la pista (compensa cambios de iluminación/balance de blancos).
+         */
+        data class HsvSample(
+            val hue: Double,
+            val saturation: Double,
+            val value: Double,
+            val colorLabel: String,
+            val area: Double
+        )
+
+        var lastPrimaryHsvSample: HsvSample? = null
+
+        data class RejectedInfo(val color: String, val reason: String, val area: Double)
+        val lastRejectedObjects = mutableListOf<RejectedInfo>()
+
+
+        // =============================================================================
+        // MODO CALIBRACIÓN — rangos HSV ampliados para detectar hasta variantes extremas
+        // =============================================================================
+        // Cuando está activo, el analizador ignora los rangos calibrados/preset de
+        // ColorConfig y usa estos rangos máximos. Esto permite capturar muestras de
+        // objetos que el rango actual NO detectaría (rojo muy oscuro, verde muy oscuro,
+        // objetos con contraluz severo). Se activa desde el diálogo de calibración y
+        // se desactiva automáticamente al cerrarlo.
+        var calibrationMode = false
+
+        // Rojo: cubre 0-15° y 160-180° con S y V muy permisivos (desde 15)
+        val calibrationLowerRed1 = org.opencv.core.Scalar(0.0,  15.0, 15.0)
+        val calibrationUpperRed1 = org.opencv.core.Scalar(15.0, 255.0, 255.0)
+        val calibrationLowerRed2 = org.opencv.core.Scalar(160.0, 15.0, 15.0)
+        val calibrationUpperRed2 = org.opencv.core.Scalar(180.0, 255.0, 255.0)
+
+        // Verde: cubre 25-100° con S y V muy permisivos (desde 10)
+        val calibrationLowerGreen = org.opencv.core.Scalar(25.0, 10.0, 10.0)
+        val calibrationUpperGreen = org.opencv.core.Scalar(100.0, 255.0, 255.0)
+
         // NUEVA FUNCIÓN PARA CALCULAR DISTANCIA USANDO LAS CONSTANTES1 DE MAINACTIVITY
         /**
-         * Calcula la distancia usando las constantes centralizadas de MainActivity
+         * Calcula la distancia usando la MISMA referencia que CommandManager
+         * (ConfigSettings.referenceArea/referenceDistance), para que el valor mostrado en
+         * pantalla y el usado para decidir el comando coincidan siempre, incluso si el
+         * usuario recalibra la distancia desde Configuración.
          */
         fun calculateDistance(area: Double): Int {
-            val calculatedDistance = kotlin.math.sqrt(MainActivity.REFERENCE_AREA / area) * MainActivity.REFERENCE_DISTANCE
+            if (area <= 0.0) return MainActivity.MAX_DISTANCE
+            val calculatedDistance = kotlin.math.sqrt(ConfigSettings.referenceArea / area) * ConfigSettings.referenceDistance
             return calculatedDistance.toInt().coerceIn(MainActivity.MIN_DISTANCE, MainActivity.MAX_DISTANCE)
         }
 
         /**
-         * Calcula la orientación del objeto basándose en su posición
+         * Igual que calculateDistance pero SIN recortar (coerceIn) al máximo configurado.
+         * Se usa para decidir si un contorno está realmente fuera del rango útil de la
+         * pista y debe descartarse del todo, en vez de aparecer "pegado" al máximo (180cm)
+         * y colarse como si fuera un objeto válido en el límite de la zona Atrás.
          */
+        private fun estimateRawDistance(area: Double): Double {
+            if (area <= 0.0) return Double.MAX_VALUE
+            return kotlin.math.sqrt(ConfigSettings.referenceArea / area) * ConfigSettings.referenceDistance
+        }
 
 
     }
@@ -90,7 +140,7 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
     private val enableCLAHE = true
 
     /** Límite de contraste para CLAHE - valor conservador para evitar sobreecualización */
-    private val claheClipLimit = 2.0
+    private val claheClipLimit = 1.2
 
     /** Tamaño de la cuadrícula para CLAHE - 8x8 es bueno para objetos medianos */
     private val claheTileGridSize = Size(8.0, 8.0)
@@ -101,32 +151,130 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
 
     // ROJO: Se define en dos rangos debido a que el rojo está en los extremos del espectro H
 
-    /** Rango HSV para tonos rojos bajos (0-10 grados) */
-    // Se ha bajado el mínimo de Saturación y Valor para mayor flexibilidad
-    private val lowerRed1 = Scalar(0.0, 70.0, 50.0)
-    private val upperRed1 = Scalar(10.0, 255.0, 255.0)
+    /** Rango HSV para tonos rojos bajos (0-10 grados)
+    private val lowerRed1 = Scalar(0.0, 40.0, 40.0)
+    private val upperRed1 = Scalar(8.0, 255.0, 255.0)
 
     /** Rango HSV para tonos rojos altos (170-180 grados) */
-    // Se ha bajado el mínimo de Saturación y Valor y ampliado ligeramente el Tono
-    private val lowerRed2 = Scalar(170.0, 70.0, 50.0)
+    // Se sube el límite inferior de 160 a 170 para no tocar los tonos magenta/rosa.
+    private val lowerRed2 = Scalar(170.0, 80.0, 60.0)
     private val upperRed2 = Scalar(180.0, 255.0, 255.0)
 
-    /** Rango HSV para color magenta (145-170 grados) */
-    private val lowerMagenta = Scalar(145.0, 90.0, 60.0)  // H: 145°, S: 35%, V: 24%
-    private val upperMagenta = Scalar(170.0, 255.0, 255.0) // H: 170°, S: 100%, V: 100%
+    // /** Rango HSV para color magenta (145-170 grados) */
+    // private val lowerMagenta = Scalar(145.0, 70.0, 60.0)
+    // private val upperMagenta = Scalar(169.0, 255.0, 255.0)
 
     /** Rango HSV para color verde */
-    private val lowerGreen = Scalar(30.0, 40.0, 25.0)   // H: 30°, S: 16%, V: 10%
-    private val upperGreen = Scalar(90.0, 255.0, 255.0) // H: 90°, S: 100%, V: 100%
+    private val lowerGreen = Scalar(35.0, 25.0, 15.0) // H: 30°, S: 16%, V: 10%
+    private val upperGreen = Scalar(90.0, 255.0, 255.0) // H: 90°, S: 100%, V: 100% */
 
     // =============================================================================
     // PARÁMETROS GENERALES DE DETECCIÓN
     // =============================================================================
 
     /** Área mínima en píxeles que debe tener un contorno para ser considerado válido */
-    private val minContourArea = 800.0
+    private val minContourArea = 280.0
 
-    /** Habilita mensajes de depuración en el log */
+
+    /** Cuántas veces más grande es el delimitador magenta que un pilar rojo/verde
+     *  a la MISMA distancia (medido físicamente: ver Figura 13). Se usa para (a)
+     *  descartar por área objetos rojos/verdes que "gotean" hacia la máscara
+     *  magenta por solapamiento de Hue, y (b) corregir el cálculo de distancia
+     *  específico para magenta (ver calculateMagentaDistance más abajo). */
+    private val magentaAreaRatio = 4.0
+
+
+    /** Relación de aspecto máxima (ancho/alto) que puede tener un pilar Rojo/Verde real.
+     *  Por encima de esto es demasiado "ancho" para ser un pilar de frente y se reclasifica
+     *  como Estacionamiento antes de aplicar el filtro de forma normal. */
+    private val maxPillarAspectRatio = 1.2
+
+
+    /** Rectangularidad mínima (área_contorno / área_bounding_box) que debe tener un
+     *  candidato a "pared" para contar como tal. Una franja diagonal delgada (como la
+     *  cinta naranja de referencia en su parte en sombra) llena muy poco de su bounding
+     *  box -> rectangularidad baja, así se descarta aunque sea oscura y toque el borde.
+     *  CALIBRAR IN SITU con los logs nuevos: mirá el valor real de la pared vs el de
+     *  falsos positivos como la cinta, y ajustá este número entre ambos. */
+    private val minWallRectangularity = 0.55
+
+
+    /** Área mínima específica para contornos magenta. Se usa un factor algo menor
+     *  a magentaAreaRatio (3.0 en vez de 4.0) para dejar margen ante ángulos de
+     *  cámara oblicuos, donde el área proyectada del delimitador se reduce un
+     *  poco — pero sigue muy por encima del área típica de un pilar real, así
+     *  que un pilar rojo/verde jamás la va a superar. */
+    private val minMagentaContourArea = minContourArea * 3.0
+
+
+
+    /** Área máxima que puede llegar a tener un pilar Rojo/Verde REAL en cámara —
+     *  calculada a partir de la distancia mínima físicamente posible (el borde de
+     *  la zona "Adelante"; más cerca que eso, el auto ya debería haber reaccionado).
+     *  Cualquier contorno Rojo/Verde por encima de este valor es IMPOSIBLE que sea
+     *  un pilar real — es el estacionamiento (u otro objeto grande) detectado con
+     *  un color parecido al del pilar. Se recalcula en vivo por si el usuario
+     *  cambia la calibración de distancia desde Configuración. */
+    private val maxPlausibleRedGreenArea: Double
+        get() {
+            val minPlausibleDistance = ConfigSettings.frontDistanceMin.toDouble().coerceAtLeast(1.0)
+            return ConfigSettings.referenceArea * (ConfigSettings.referenceDistance / minPlausibleDistance).let { it * it }
+        }
+
+
+
+    /** Área mínima para que un contorno magenta ACTIVE el modo estacionamiento.
+     *  Es mayor a minMagentaContourArea a propósito: un delimitador real visto
+     *  DE FRENTE desde el tramo anterior mucha menos
+     *  área que el mismo delimitador visto DE COSTADO ya en su propio tramo
+     *  aunque ambos sean el objeto real y pasen el filtro de forma,
+     *  solo el segundo debe activar el modo.
+     *  */
+
+    private val minMagentaActivationArea = 8000.0
+
+
+
+
+
+    /** Valor (brillo) máximo para considerar un píxel parte de la "pared negra" del
+     *  estacionamiento — independiente del Hue, porque en competencia la pared es
+     *  negra sin importar el tono. CALIBRAR IN SITU: en la pista real, revisá el
+     *  texto de diagnóstico en pantalla apuntando a la pared negra y ajustá este
+     *  valor según lo que reporte. */
+    private val wallMaxValue = 70.0
+
+    /** Saturación máxima para "pared negra" — permite algo de margen ante reflejos
+     *  o variaciones de tono en el material negro, sin confundirse con colores
+     *  saturados (rojo/verde/magenta real). */
+    private val wallMaxSaturation = 90.0
+
+    /** Área mínima para que la mancha negra cuente como "pared", no ruido/sombra. */
+    private val wallMinContourArea = 5000.0
+
+    /** Qué tan cerca del borde de la pantalla tiene que llegar la mancha negra
+     *  para considerar que "toca" ese lado. 0.05 = 5% del ancho del ROI. */
+    private val wallEdgeTouchMargin = 0.05f
+
+
+
+
+    /** Umbral de área para reclasificar un contorno Rojo/Verde como "estacionamiento
+     *  por forma" — respaldo para cuando el color del delimitador es demasiado
+     *  parecido a un pilar y la detección por Hue falla. Reutiliza un criterio de
+     *  tamaño similar al del canal Magenta; ajustalo si hace falta. */
+    private val parkingShapeAreaThreshold = 2200.0
+
+    /** Qué tan pegado al borde extremo de la pantalla debe estar un contorno para
+     *  considerarlo "en la pared" (estacionamiento) en vez de "en el carril" (pilar
+     *  normal). 0.18 = 18% desde cada borde. Es más estricto que el split L/R normal
+     *  (0.60) a propósito — el delimitador está pegado a la pared, no solo del lado
+     *  izquierdo/derecho del carril. */
+    private val parkingEdgeZone = 0.18f
+
+
+
+        /** Habilita mensajes de depuración en el log */
     private val debugMode = true
 
     /** Porcentaje de la imagen que se usa como ROI (Región de Interés) */
@@ -140,7 +288,7 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
     // =============================================================================
 
     /** Solidez mínima (área_contorno / área_casco_convexo) para formas regulares */
-    private val minSolidity = 0.5
+    private val minSolidity = 0.4
 
     /** Relación de aspecto máxima (ancho/alto) permitida */
     private val maxAspectRatio = 4.0
@@ -149,20 +297,39 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
     private val minAspectRatio = 0.25
 
     /** Extensión mínima (área_contorno / área_rectángulo_envolvente) */
-    private val minExtent = 0.4
+    private val minExtent = 0.30
 
     /** Ratio máximo perímetro²/área para filtrar formas complejas */
-    private val maxPerimeterAreaRatio = 20.0
+    private val maxPerimeterAreaRatio = 30.0
 
     /** Habilita el filtrado básico de formas */
     private val enableShapeFiltering = true
+
+
+    // =============================================================================
+// PARÁMETROS DE FORMA ESPECÍFICOS PARA EL DELIMITADOR MAGENTA
+// =============================================================================
+// El delimitador de estacionamiento es una placa plana y delgada, no un pilar
+// compacto. Visto en perspectiva (cara superior delgada + cara frontal) genera
+// contornos con menor convexidad y mayor perímetro relativo que un pilar, así
+// que necesita sus propios umbrales — más permisivos — en vez de reusar los
+// pensados para Rojo/Verde.
+
+    private val minSolidityMagenta = 0.55
+    private val minConvexityMagenta = 0.65
+    private val maxConvexityDefectsMagenta = 6
+    private val minRectangularityMagenta = 0.35
+    private val maxPerimeterAreaRatioMagenta = 45.0
+    private val minAspectRatioMagenta = 0.15   // permite verse muy angosto en ciertos ángulos
+    private val maxAspectRatioMagenta = 8.0    // permite verse muy alargado (placa larga y baja)
+    private val minExtentMagenta = 0.3
 
     // =============================================================================
     // PARÁMETROS PARA FILTRADO AVANZADO
     // =============================================================================
 
     /** Rectangularidad mínima (área_contorno / área_rectángulo_envolvente) */
-    private val minRectangularity = 0.6
+    private val minRectangularity = 0.35
 
     /** Número máximo de defectos de convexidad permitidos */
     private val maxConvexityDefects = 3
@@ -195,6 +362,26 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
 
     /** Umbral de ángulo máximo en grados para considerar un pico */
     private val maxAngleThreshold = 45.0
+
+
+    // =============================================================================
+// PARÁMETROS PARA FILTRADO DE REFLEJOS POR SATURACIÓN
+// =============================================================================
+
+    /** Saturación mínima promedio (canal S en HSV 0-255) que debe tener el área interna del objeto ROJO.
+     *  Configurable desde Configuración > Filtro Anti-Reflejo. */
+    private val minInternalSaturationRed: Double
+        get() = ConfigSettings.minInternalSaturationRed.toDouble()
+
+    /** Saturación mínima promedio para el área interna del objeto VERDE.
+     *  Configurable desde Configuración > Filtro Anti-Reflejo. */
+    private val minInternalSaturationGreen: Double
+        get() = ConfigSettings.minInternalSaturationGreen.toDouble()
+
+    /** Habilita el filtro anti-reflejo por análisis de saturación interna */
+    private val enableSaturationReflectionFilter: Boolean
+        get() = ConfigSettings.reflectionFilterEnabled
+
 
     /**
      * Función principal de análisis que procesa cada frame de la cámara
@@ -277,20 +464,21 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
                 // =============================================================================
                 // 5. CREACIÓN DE MÁSCARAS PARA CADA COLOR
                 // =============================================================================
+                val maskRed1 = Mat()
+                val maskRed2 = Mat()
+                val maskRed = Mat()
+                val maskGreen = Mat()
+                val maskMagenta = Mat()
+                val maskWall = Mat()
 
-                val maskRed1 = Mat()      // Máscara para rojo bajo
-                val maskRed2 = Mat()      // Máscara para rojo alto
-                val maskRed = Mat()       // Máscara combinada para rojo
-                val maskGreen = Mat()     // Máscara para verde
-                val maskMagenta = Mat()   // Máscara para magenta
+                Core.inRange(equalizedHSV, ColorConfig.lowerRed1, ColorConfig.upperRed1, maskRed1)
+                Core.inRange(equalizedHSV, ColorConfig.lowerRed2, ColorConfig.upperRed2, maskRed2)
+                Core.inRange(equalizedHSV, ColorConfig.lowerGreen, ColorConfig.upperGreen, maskGreen)
+                Core.inRange(equalizedHSV, ColorConfig.lowerMagenta, ColorConfig.upperMagenta, maskMagenta)
 
-                // Crear máscaras binarias usando rangos HSV
-                Core.inRange(equalizedHSV, lowerRed1, upperRed1, maskRed1)
-                Core.inRange(equalizedHSV, lowerRed2, upperRed2, maskRed2)
-                Core.inRange(equalizedHSV, lowerGreen, upperGreen, maskGreen)
-                Core.inRange(equalizedHSV, lowerMagenta, upperMagenta, maskMagenta)
+// Máscara de "pared negra" — independiente del Hue, solo mira brillo/saturación.
+                Core.inRange(equalizedHSV, Scalar(0.0, 0.0, 0.0), Scalar(180.0, wallMaxSaturation, wallMaxValue), maskWall)
 
-                // Combinar las dos máscaras de rojo
                 Core.bitwise_or(maskRed1, maskRed2, maskRed)
 
                 // =============================================================================
@@ -298,18 +486,31 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
                 // =============================================================================
 
                 // Kernel rectangular para operaciones morfológicas
-                val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
+                // OPEN usa un kernel más grande para romper los "puentes" finos que conectan
+                // el objeto con un reflejo/sombra adyacente del mismo color.
+                // CLOSE usa un kernel más chico para no volver a unir lo que OPEN separó.
+                val kernelOpen = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(7.0, 7.0))
+                val kernelClose = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
 
-                // Aplicar apertura (erosión + dilatación) para eliminar ruido
-                // Seguida de cierre (dilatación + erosión) para llenar huecos
-                Imgproc.morphologyEx(maskRed, maskRed, Imgproc.MORPH_OPEN, kernel)
-                Imgproc.morphologyEx(maskRed, maskRed, Imgproc.MORPH_CLOSE, kernel)
+                // Aplicar apertura (erosión + dilatación) para eliminar ruido y separar reflejos pegados
+                // Seguida de cierre (dilatación + erosión) para llenar huecos internos pequeños
+                Imgproc.morphologyEx(maskRed, maskRed, Imgproc.MORPH_OPEN, kernelOpen)
+                Imgproc.morphologyEx(maskRed, maskRed, Imgproc.MORPH_CLOSE, kernelClose)
 
-                Imgproc.morphologyEx(maskGreen, maskGreen, Imgproc.MORPH_OPEN, kernel)
-                Imgproc.morphologyEx(maskGreen, maskGreen, Imgproc.MORPH_CLOSE, kernel)
+                Imgproc.morphologyEx(maskGreen, maskGreen, Imgproc.MORPH_OPEN, kernelOpen)
+                Imgproc.morphologyEx(maskGreen, maskGreen, Imgproc.MORPH_CLOSE, kernelClose)
 
-                Imgproc.morphologyEx(maskMagenta, maskMagenta, Imgproc.MORPH_OPEN, kernel)
-                Imgproc.morphologyEx(maskMagenta, maskMagenta, Imgproc.MORPH_CLOSE, kernel)
+                if (!maskMagenta.empty()) {
+                    Imgproc.morphologyEx(maskMagenta, maskMagenta, Imgproc.MORPH_OPEN, kernelOpen)
+                    Imgproc.morphologyEx(maskMagenta, maskMagenta, Imgproc.MORPH_CLOSE, kernelClose)
+                }
+
+                Imgproc.morphologyEx(maskWall, maskWall, Imgproc.MORPH_OPEN, kernelOpen)
+                Imgproc.morphologyEx(maskWall, maskWall, Imgproc.MORPH_CLOSE, kernelClose)
+
+
+                // Imgproc.morphologyEx(maskMagenta, maskMagenta, Imgproc.MORPH_OPEN, kernel)
+                // Imgproc.morphologyEx(maskMagenta, maskMagenta, Imgproc.MORPH_CLOSE, kernel)
 
                 // =============================================================================
                 // 7. DETECCIÓN DE CONTORNOS
@@ -318,11 +519,15 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
                 val contoursRed = ArrayList<MatOfPoint>()
                 val contoursGreen = ArrayList<MatOfPoint>()
                 val contoursMagenta = ArrayList<MatOfPoint>()
+                val contoursWall = ArrayList<MatOfPoint>()   // ← NUEVO
 
-                // Encontrar contornos externos en cada máscara
+
                 Imgproc.findContours(maskRed, contoursRed, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
                 Imgproc.findContours(maskGreen, contoursGreen, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
-                Imgproc.findContours(maskMagenta, contoursMagenta, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+                if (!maskMagenta.empty()) {
+                    Imgproc.findContours(maskMagenta, contoursMagenta, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+                }
+                Imgproc.findContours(maskWall, contoursWall, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
 
                 if (debugMode) {
                     Log.d("ColorAnalyzer", "Contornos encontrados - Rojos: ${contoursRed.size}, Verdes: ${contoursGreen.size}, Magentas: ${contoursMagenta.size}")
@@ -345,85 +550,150 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
                     contoursGreen
                 }
 
-                val smoothedMagentaContours = if (enableContourSmoothing) {
-                    contoursMagenta.map { smoothContourAdvanced(it) }
-                } else {
-                    contoursMagenta
-                }
+                // val smoothedMagentaContours = if (enableContourSmoothing) {
+                //     contoursMagenta.map { smoothContourAdvanced(it) }
+                // } else {
+                //     contoursMagenta
+                // }
 
                 // =============================================================================
                 // 9. FILTRADO GEOMÉTRICO DE CONTORNOS
                 // =============================================================================
 
                 // Aplicar filtros para validar formas rectangulares
+                lastRejectedObjects.clear()
+                // Separar ANTES de aplicar el filtro estricto de "forma de pilar" — el
+// aspect ratio del boundingRect es válido sin importar qué tan irregular
+// sea el contorno por dentro (no depende de solidez/convexidad como
+// isRegularShape, que puede rechazar el estacionamiento antes de llegar a
+// medir su forma real).
+                val wideRedContours = mutableListOf<MatOfPoint>()
+
                 val validRedContours = smoothedRedContours.filter { contour ->
                     val area = Imgproc.contourArea(contour)
-                    if (area > minContourArea) {
-                        if (enableShapeFiltering) {
-                            val basicCheck = isRegularShape(contour, area)
-                            val advancedCheck = if (enableAdvancedFiltering) {
-                                isRectangularShape(contour, area)
-                            } else {
-                                true
-                            }
-                            basicCheck && advancedCheck
-                        } else {
-                            true
-                        }
-                    } else {
+                    if (area <= minContourArea) {
+                        if (debugMode) Log.d("ColorAnalyzer", "Contorno rojo rechazado por área pequeña: $area < $minContourArea")
+                        lastRejectedObjects.add(RejectedInfo("Rojo", "área pequeña (${area.toInt()}px)", area))
+                        return@filter false
+                    }
+
+                    val boundingRect = Imgproc.boundingRect(contour)
+                    val aspectRatio = boundingRect.width.toDouble() / boundingRect.height.toDouble()
+
+                    if (aspectRatio > maxPillarAspectRatio) {
                         if (debugMode) {
-                            Log.d("ColorAnalyzer", "Contorno rojo rechazado por área pequeña: $area < $minContourArea")
+                            Log.d("ColorAnalyzer", "🔴➡️🟣 Rojo ancho detectado ANTES del filtro de pilar: aspect=${"%.2f".format(aspectRatio)} > máx=$maxPillarAspectRatio (área=${area.toInt()}px) — va como Estacionamiento")
                         }
-                        false
+                        wideRedContours.add(contour)
+                        return@filter false
+                    }
+
+                    if (calibrationMode) {
+                        isRegularShape(contour, area) && isRectangularShape(contour, area)
+                    } else if (enableShapeFiltering) {
+                        val basicCheck = isRegularShape(contour, area)
+                        val advancedCheck = if (enableAdvancedFiltering) isRectangularShape(contour, area) else true
+                        val reflectionCheck = if (enableSaturationReflectionFilter) hasRealObjectSaturation(contour, equalizedHSV, minInternalSaturationRed, "Rojo") else true
+                        val passed = basicCheck && advancedCheck && reflectionCheck
+                        if (!passed) {
+                            val reason = when {
+                                !basicCheck -> "forma irregular"
+                                !advancedCheck -> "no rectangular"
+                                !reflectionCheck -> "reflejo (sat. baja)"
+                                else -> "rechazado"
+                            }
+                            lastRejectedObjects.add(RejectedInfo("Rojo", reason, area))
+                        }
+                        passed
+                    } else {
+                        val passed = if (enableSaturationReflectionFilter) hasRealObjectSaturation(contour, equalizedHSV, minInternalSaturationRed, "Rojo") else true
+                        if (!passed) lastRejectedObjects.add(RejectedInfo("Rojo", "reflejo (sat. baja)", area))
+                        passed
                     }
                 }
+
+
 
                 val validGreenContours = smoothedGreenContours.filter { contour ->
                     val area = Imgproc.contourArea(contour)
                     if (area > minContourArea) {
-                        if (enableShapeFiltering) {
+                        if (calibrationMode) {
+                            isRegularShape(contour, area) && isRectangularShape(contour, area)
+                        } else if (enableShapeFiltering) {
                             val basicCheck = isRegularShape(contour, area)
-                            val advancedCheck = if (enableAdvancedFiltering) {
-                                isRectangularShape(contour, area)
-                            } else {
-                                true
+                            val advancedCheck = if (enableAdvancedFiltering) isRectangularShape(contour, area) else true
+                            val reflectionCheck = if (enableSaturationReflectionFilter) hasRealObjectSaturation(contour, equalizedHSV, minInternalSaturationGreen, "Verde") else true
+                            val passed = basicCheck && advancedCheck && reflectionCheck
+                            if (!passed) {
+                                val reason = when {
+                                    !basicCheck -> "forma irregular"
+                                    !advancedCheck -> "no rectangular"
+                                    !reflectionCheck -> "reflejo (sat. baja)"
+                                    else -> "rechazado"
+                                }
+                                lastRejectedObjects.add(RejectedInfo("Verde", reason, area))
                             }
-                            basicCheck && advancedCheck
+                            passed
                         } else {
-                            true
+                            val passed = if (enableSaturationReflectionFilter) hasRealObjectSaturation(contour, equalizedHSV, minInternalSaturationGreen, "Verde") else true
+                            if (!passed) lastRejectedObjects.add(RejectedInfo("Verde", "reflejo (sat. baja)", area))
+                            passed
                         }
                     } else {
-                        if (debugMode) {
-                            Log.d("ColorAnalyzer", "Contorno verde rechazado por área pequeña: $area < $minContourArea")
-                        }
+                        if (debugMode) Log.d("ColorAnalyzer", "Contorno verde rechazado por área pequeña: $area < $minContourArea")
+                        lastRejectedObjects.add(RejectedInfo("Verde", "área pequeña (${area.toInt()}px)", area))
                         false
                     }
                 }
 
-                val validMagentaContours = smoothedMagentaContours.filter { contour ->
-                    val area = Imgproc.contourArea(contour)
-                    if (area > minContourArea) {
-                        if (enableShapeFiltering) {
-                            val basicCheck = isRegularShape(contour, area)
-                            val advancedCheck = if (enableAdvancedFiltering) {
-                                isRectangularShape(contour, area)
-                            } else {
-                                true
-                            }
-                            basicCheck && advancedCheck
-                        } else {
-                            true
-                        }
+
+
+                val validMagentaContours = if (true) {
+                    val smoothedMagentaContours = if (enableContourSmoothing) {
+                        contoursMagenta.map { smoothContourAdvanced(it) }
                     } else {
-                        if (debugMode) {
-                            Log.d("ColorAnalyzer", "Contorno magenta rechazado por área pequeña: $area < $minContourArea")
-                        }
-                        false
+                        contoursMagenta
                     }
-                }
+                    smoothedMagentaContours.filter { contour ->
+                        val area = Imgproc.contourArea(contour)
+                        if (area > minMagentaContourArea) {
+                            if (calibrationMode) {
+                                isRegularShapeMagenta(contour, area) && isRectangularShapeMagenta(contour, area)
+                            } else if (enableShapeFiltering) {
+                                val basicCheck = isRegularShapeMagenta(contour, area)
+                                val advancedCheck = if (enableAdvancedFiltering) isRectangularShapeMagenta(contour, area) else true
+                                val reflectionCheck = if (enableSaturationReflectionFilter) hasRealObjectSaturation(contour, equalizedHSV, minInternalSaturationRed, "Magenta") else true
+                                val passed = basicCheck && advancedCheck && reflectionCheck
+                                if (!passed) {
+                                    val reason = when {
+                                        !basicCheck -> "forma irregular"
+                                        !advancedCheck -> "no rectangular"
+                                        !reflectionCheck -> "reflejo (sat. baja)"
+                                        else -> "rechazado"
+                                    }
+                                    lastRejectedObjects.add(RejectedInfo("Magenta", reason, area))
+                                }
+                                passed
+                            } else {
+                                val passed = if (enableSaturationReflectionFilter) hasRealObjectSaturation(contour, equalizedHSV, minInternalSaturationRed, "Magenta") else true
+                                if (!passed) lastRejectedObjects.add(RejectedInfo("Magenta", "reflejo (sat. baja)", area))
+                                passed
+                            }
+                        } else {
+                            lastRejectedObjects.add(RejectedInfo("Magenta", "área pequeña (${area.toInt()}px)", area))
+                            false
+                        }
+                    }
+                } else emptyList()
 
                 if (debugMode) {
                     Log.d("ColorAnalyzer", "Contornos válidos después del filtrado - Rojos: ${validRedContours.size}, Verdes: ${validGreenContours.size}, Magentas: ${validMagentaContours.size}")
+                }
+
+
+                if (debugMode) {
+                    // Log.d("ColorAnalyzer", "Contornos válidos después del filtrado - Rojos: ${validRedContours.size}, Verdes: ${validGreenContours.size}, Magentas: ${validMagentaContours.size}")
+                    Log.d("ColorAnalyzer", "Contornos válidos después del filtrado - Rojos: ${validRedContours.size}, Verdes: ${validGreenContours.size}")
                 }
 
                 // =============================================================================
@@ -431,34 +701,207 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
                 // =============================================================================
 
                 // Crear lista de todos los contornos válidos con su información
-                val allValidContours = mutableListOf<Triple<MatOfPoint, String, Double>>()
+                data class ContourCandidate(
+                    val contour: MatOfPoint,
+                    val color: String,
+                    val area: Double,
+                    val qualityScore: Double,
+                    val estimatedDistance: Double
+                )
 
-                // Agregar contornos rojos válidos
+                val allValidContours = mutableListOf<ContourCandidate>()
+
                 validRedContours.forEach { contour ->
                     val area = Imgproc.contourArea(contour)
-                    allValidContours.add(Triple(contour, "Rojo", area))
+                    val estimatedDistance = estimateRawDistance(area)
+                    if (estimatedDistance <= ConfigSettings.backDistanceMax) {
+                        val score = computeRealObjectScore(contour, equalizedHSV)
+
+                        if (area > maxPlausibleRedGreenArea) {
+                            if (debugMode) {
+                                Log.d("ColorAnalyzer", "🔴➡️🟣 Rojo reclasificado a Estacionamiento: área=${area.toInt()}px > máx plausible=${maxPlausibleRedGreenArea.toInt()}px")
+                            }
+                            allValidContours.add(ContourCandidate(contour, "Magenta", area, score, estimatedDistance))
+                        } else {
+                            allValidContours.add(ContourCandidate(contour, "Rojo", area, score, estimatedDistance))
+                        }
+                    } else if (debugMode) {
+                        Log.d("ColorAnalyzer", "Contorno Rojo descartado: fuera de rango (${estimatedDistance.toInt()}cm > máx ${ConfigSettings.backDistanceMax}cm)")
+                    }
                 }
 
-                // Agregar contornos verdes válidos
+
+                wideRedContours.forEach { contour ->
+                    val area = Imgproc.contourArea(contour)
+                    val estimatedDistance = estimateRawDistance(area)
+                    val satOk = if (enableSaturationReflectionFilter) hasRealObjectSaturation(contour, equalizedHSV, minInternalSaturationRed, "Estacionamiento(ancho)") else true
+                    if (satOk && estimatedDistance <= ConfigSettings.backDistanceMax) {
+                        val score = computeRealObjectScore(contour, equalizedHSV)
+                        allValidContours.add(ContourCandidate(contour, "Magenta", area, score, estimatedDistance))
+                    } else if (debugMode) {
+                        Log.d("ColorAnalyzer", "Rojo ancho descartado: sat=$satOk, dist=${estimatedDistance.toInt()}cm")
+                    }
+                }
+
+
+// Bloque de Verde — volver a esta versión simple, SIN reclasificación:
                 validGreenContours.forEach { contour ->
                     val area = Imgproc.contourArea(contour)
-                    allValidContours.add(Triple(contour, "Verde", area))
+                    val estimatedDistance = estimateRawDistance(area)
+                    if (estimatedDistance <= ConfigSettings.backDistanceMax) {
+                        val score = computeRealObjectScore(contour, equalizedHSV)
+                        allValidContours.add(ContourCandidate(contour, "Verde", area, score, estimatedDistance))
+                    } else if (debugMode) {
+                        Log.d("ColorAnalyzer", "Contorno Verde descartado: fuera de rango (${estimatedDistance.toInt()}cm > máx ${ConfigSettings.backDistanceMax}cm)")
+                    }
                 }
 
-                // Agregar contornos magentas válidos
+
                 validMagentaContours.forEach { contour ->
                     val area = Imgproc.contourArea(contour)
-                    allValidContours.add(Triple(contour, "Magenta", area))
+                    val estimatedDistance = estimateRawDistance(area)
+                    if (estimatedDistance <= ConfigSettings.backDistanceMax) {
+                        val score = computeRealObjectScore(contour, equalizedHSV)
+                        allValidContours.add(ContourCandidate(contour, "Magenta", area, score, estimatedDistance))
+                    } else if (debugMode) {
+                        Log.d("ColorAnalyzer", "Contorno Magenta descartado: fuera de rango (${estimatedDistance.toInt()}cm > máx ${ConfigSettings.backDistanceMax}cm)")
+                    }
                 }
 
-                // Ordenar por área (más grande primero)
-                val sortedContours = allValidContours.sortedByDescending { it.third }
+                val sortedContours = allValidContours.sortedWith(
+                    compareBy<ContourCandidate> { it.estimatedDistance }
+                        .thenByDescending { it.qualityScore }
+                )
 
                 if (debugMode) {
                     Log.d("ColorAnalyzer", "Total contornos válidos encontrados: ${sortedContours.size}")
-                    sortedContours.forEachIndexed { index, (_, color, area) ->
-                        Log.d("ColorAnalyzer", "Objeto $index: Color=$color, Área=$area")
+                    sortedContours.forEachIndexed { index, c ->
+                        Log.d("ColorAnalyzer", "Objeto $index: Color=${c.color}, Área=${c.area.toInt()}, Dist=${c.estimatedDistance.toInt()}cm, Score=${"%.3f".format(c.qualityScore)}")
                     }
+                }
+
+                val magentaCandidateNearby = sortedContours
+                    .filter { it.color == "Magenta" }
+                    .maxByOrNull { it.area }
+
+                val magentaVisible = magentaCandidateNearby != null && magentaCandidateNearby.area >= minMagentaActivationArea
+
+// Detección de la pared negra del estacionamiento — señal INDEPENDIENTE del
+// color del delimitador, no puede confundirse con un pilar Rojo/Verde real
+// porque nunca mira Hue, solo brillo/saturación bajos pegados al borde.
+data class WallCandidateInfo(
+    val contour: MatOfPoint,
+    val area: Double,
+    val boundingRect: org.opencv.core.Rect,
+    val rectangularity: Double,
+    val aspectRatio: Double,
+    val touchesBottom: Boolean,
+    val touchesLeft: Boolean,
+    val touchesRight: Boolean
+)
+
+                // Evaluar TODOS los candidatos oscuros (no solo el más grande) para
+                // poder loguear por qué se aceptan o descartan.
+                // NUEVO: si el switch está apagado, ni se calcula — lista vacía directo.
+                val wallCandidatesInfo = if (ConfigSettings.wallDetectionEnabled) {
+                    contoursWall
+                        .map { c -> Pair(c, Imgproc.contourArea(c)) }
+                        .filter { it.second >= wallMinContourArea }
+                        .map { (contour, area) ->
+                            val br = Imgproc.boundingRect(contour)
+                            val rectangularity = area / (br.width * br.height).toDouble()
+                            val aspectRatio = br.width.toDouble() / br.height.toDouble()
+                            val touchesBottom = (br.y + br.height) >= roiMat.height() * (1f - wallEdgeTouchMargin)
+                            val touchesLeft = br.x <= roiMat.width() * wallEdgeTouchMargin
+                            val touchesRight = (br.x + br.width) >= roiMat.width() * (1f - wallEdgeTouchMargin)
+                            WallCandidateInfo(contour, area, br, rectangularity, aspectRatio, touchesBottom, touchesLeft, touchesRight)
+                        }
+                        .sortedByDescending { it.area }
+                } else {
+                    emptyList()
+                }
+
+                if (debugMode) {
+                    wallCandidatesInfo.forEachIndexed { i, w ->
+                        Log.d("ColorAnalyzer", "⬛ Candidato pared #$i: área=${w.area.toInt()}px, rect=${"%.2f".format(w.rectangularity)} (mín=$minWallRectangularity), aspect=${"%.2f".format(w.aspectRatio)}, tocaAbajo=${w.touchesBottom}, tocaIzq=${w.touchesLeft}, tocaDer=${w.touchesRight}")
+                    }
+                }
+
+                // Ahora sí exige forma de pared: rectangular Y apoyada en el piso.
+                val wallCandidate = wallCandidatesInfo.firstOrNull {
+                    it.rectangularity >= minWallRectangularity && it.touchesBottom
+                }
+
+                var wallSide: String? = null
+                var wallDebugText = ""
+
+                if (wallCandidate != null) {
+                    wallSide = when {
+                        wallCandidate.touchesLeft && !wallCandidate.touchesRight -> "L"
+                        wallCandidate.touchesRight && !wallCandidate.touchesLeft -> "R"
+                        else -> null
+                    }
+                    wallDebugText = "⬛✅ Pared: área=${wallCandidate.area.toInt()}px, rect=${"%.2f".format(wallCandidate.rectangularity)}, aspect=${"%.2f".format(wallCandidate.aspectRatio)}, lado=${wallSide ?: "?"}"
+                    if (debugMode) Log.d("ColorAnalyzer", wallDebugText)
+                } else if (debugMode && wallCandidatesInfo.isNotEmpty()) {
+                    val top = wallCandidatesInfo.first()
+                    wallDebugText = "⬛❌ Pared descartada: área=${top.area.toInt()}px, rect=${"%.2f".format(top.rectangularity)} (mín $minWallRectangularity), tocaAbajo=${top.touchesBottom}"
+                    Log.d("ColorAnalyzer", wallDebugText)
+                }
+
+// Texto de diagnóstico visible en pantalla (magenta + pared)
+                var magentaDebugText = ""
+
+                if (magentaCandidateNearby != null && !magentaVisible) {
+                    magentaDebugText = "🟣⚠️ Magenta LEJOS (ignorado): área=${magentaCandidateNearby.area.toInt()}px (mín=${minMagentaActivationArea.toInt()}px)"
+                    if (debugMode) Log.d("ColorAnalyzer", magentaDebugText)
+                }
+
+// El modo se activa por CUALQUIERA de las dos señales — color O pared negra.
+                // El switch general apaga TODA la activación (comandos de estacionar),
+                // sin importar lo que digan magentaVisible o wallSide.
+                val parkingActive = ConfigSettings.parkingDetectionEnabled && (magentaVisible || (wallSide != null))
+
+
+                if (parkingActive) {
+                    CommandManager.activateParkingMode()
+                    val activationSource = if (wallSide != null) "Pared" else "Magenta"
+                    magentaDebugText = "🟣✅ Estacionamiento ACTIVO (fuente: $activationSource)" +
+                            (if (wallDebugText.isNotEmpty()) "\n$wallDebugText" else "") +
+                            (if (magentaVisible) "\n🟣 Magenta área=${magentaCandidateNearby!!.area.toInt()}px" else "")
+
+                    if (CommandManager.parkingSide == null) {
+                        val side = wallSide ?: run {
+                            // Sin lectura de pared confiable, usar el lado calculado por color magenta
+                            val m = Imgproc.moments(magentaCandidateNearby!!.contour)
+                            val mx = (m.m10 / m.m00).toFloat()
+                            val my = (m.m01 / m.m00).toFloat()
+                            CommandManager.calculateOrientation(mx, my, roiMat.width(), roiMat.height())
+                        }
+                        CommandManager.setParkingSide(side)
+                    }
+                } else {
+                    CommandManager.deactivateParkingMode()
+
+                    if (debugMode && wallDebugText.isNotEmpty()) {
+                        magentaDebugText = wallDebugText
+                    }
+
+                }
+
+
+                //los objetos "target" para primario/secundario son solo Rojo/Verde.
+                // El magenta ya cumplió su función (activar el modo) y no debe competir
+                // por el slot de primario/secundario ni robarle el comando a un pilar real.
+// En modo calibración no hay pilares compitiendo por el slot primario — el
+// usuario apunta un solo color a la vez, así que el Magenta SÍ debe poder
+// ser primario para que se capture su muestra de Hue (lastPrimaryHsvSample).
+// En operación normal (pista), el Magenta sigue excluido para no robarle
+// el comando a un pilar rojo/verde real.
+                val targetContours = if (calibrationMode) {
+                    sortedContours
+                } else {
+                    sortedContours.filter { it.color != "Magenta" }
                 }
 
                 // =============================================================================
@@ -470,8 +913,14 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
                 var detectedColor = "No se detecta color significativo"
 
                 // Procesar el objeto primario (más grande/cercano)
-                if (sortedContours.isNotEmpty()) {
-                    val (primaryContour, primaryColorStr, primaryArea) = sortedContours[0]
+                if (targetContours.isNotEmpty()) {
+                    val primaryContour = targetContours[0].contour
+                    val primaryColorStr = targetContours[0].color
+                    val primaryArea = targetContours[0].area
+
+                    // Guardar muestra HSV promedio para la ventana de calibración por muestras
+                    val (sampleH, sampleS, sampleV) = computeContourMeanHsv(primaryContour, equalizedHSV)
+                    lastPrimaryHsvSample = HsvSample(sampleH, sampleS, sampleV, primaryColorStr, primaryArea)
 
                     val primaryMoments = Imgproc.moments(primaryContour)
                     val primaryCenterX = (primaryMoments.m10 / primaryMoments.m00).toFloat()
@@ -510,8 +959,10 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
 
 
                 // Procesar el objeto secundario (segundo más grande)
-                if (sortedContours.size >= 2) {
-                    val (secondaryContour, secondaryColorStr, secondaryArea) = sortedContours[1]
+                if (targetContours.size >= 2) {
+                    val secondaryContour = targetContours[1].contour
+                    val secondaryColorStr = targetContours[1].color
+                    val secondaryArea = targetContours[1].area
 
                     val secondaryMoments = Imgproc.moments(secondaryContour)
                     val secondaryCenterX = (secondaryMoments.m10 / secondaryMoments.m00).toFloat()
@@ -543,7 +994,13 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
 
                     // Dibujar información del objeto secundario
                     drawObjectInfo(roiMat, secondaryContour, secondaryColorStr, secondaryArea, "S", Scalar(0.0, 183.0, 235.0))
+
                 }
+
+                if (magentaDebugText.isNotEmpty()) {
+                    detectedColor = "$magentaDebugText\n$detectedColor"
+                }
+
 
                 // Actualizar detección dual global
                 dualDetection = DualObjectDetection(primaryObject, secondaryObject)
@@ -576,7 +1033,9 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
                 maskRed.release()
                 maskGreen.release()
                 maskMagenta.release()
-                kernel.release()
+                maskWall.release()
+                kernelOpen.release()
+                kernelClose.release()
                 roiMat.release()
             } else {
                 callback("Error: ROI es nulo", null, DualObjectDetection(null, null))
@@ -995,6 +1454,131 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
         }
     }
 
+
+
+    /**
+     * Versión relajada de isRegularShape específica para el delimitador magenta
+     * (placa plana, no pilar compacto).
+     */
+    private fun isRegularShapeMagenta(contour: MatOfPoint, area: Double): Boolean {
+        try {
+            val hull = MatOfInt()
+            Imgproc.convexHull(contour, hull)
+            val hullPoints = hull.toArray()
+            val contourPoints = contour.toArray()
+            val hullContour = MatOfPoint()
+            val hullPointsList = mutableListOf<Point>()
+            for (index in hullPoints) {
+                if (index < contourPoints.size) hullPointsList.add(contourPoints[index])
+            }
+            hullContour.fromArray(*hullPointsList.toTypedArray())
+            val hullArea = Imgproc.contourArea(hullContour)
+            val solidity = if (hullArea > 0) area / hullArea else 0.0
+
+            if (debugMode) Log.d("ColorAnalyzer", "[Magenta] Solidez: $solidity (mín: $minSolidityMagenta)")
+            if (solidity < minSolidityMagenta) {
+                hull.release(); hullContour.release()
+                return false
+            }
+
+            val boundingRect = Imgproc.boundingRect(contour)
+            val aspectRatio = boundingRect.width.toDouble() / boundingRect.height.toDouble()
+            if (debugMode) Log.d("ColorAnalyzer", "[Magenta] Aspect Ratio: $aspectRatio (rango: $minAspectRatioMagenta - $maxAspectRatioMagenta)")
+            if (aspectRatio < minAspectRatioMagenta || aspectRatio > maxAspectRatioMagenta) {
+                hull.release(); hullContour.release()
+                return false
+            }
+
+            val boundingRectArea = boundingRect.width * boundingRect.height
+            val extent = area / boundingRectArea.toDouble()
+            if (debugMode) Log.d("ColorAnalyzer", "[Magenta] Extent: $extent (mín: $minExtentMagenta)")
+            if (extent < minExtentMagenta) {
+                hull.release(); hullContour.release()
+                return false
+            }
+
+            val perimeter = Imgproc.arcLength(MatOfPoint2f(*contour.toArray()), true)
+            val perimeterAreaRatio = (perimeter * perimeter) / area
+            if (debugMode) Log.d("ColorAnalyzer", "[Magenta] Perímetro²/Área: $perimeterAreaRatio (máx: $maxPerimeterAreaRatioMagenta)")
+            if (perimeterAreaRatio > maxPerimeterAreaRatioMagenta) {
+                hull.release(); hullContour.release()
+                return false
+            }
+
+            hull.release(); hullContour.release()
+            return true
+        } catch (e: Exception) {
+            Log.e("ColorAnalyzer", "Error en filtro de forma magenta: ${e.message}")
+            return false
+        }
+    }
+
+    /**
+     * Versión relajada de isRectangularShape específica para el delimitador magenta.
+     * Se omite la detección de picos triangulares (pensada para hojas orgánicas,
+     * no aplica a una placa) y se relajan convexidad/defectos.
+     */
+    private fun isRectangularShapeMagenta(contour: MatOfPoint, area: Double): Boolean {
+        try {
+            val boundingRect = Imgproc.boundingRect(contour)
+            val boundingRectArea = boundingRect.width * boundingRect.height
+            val rectangularity = area / boundingRectArea.toDouble()
+            if (debugMode) Log.d("ColorAnalyzer", "[Magenta] Rectangularidad: $rectangularity (mín: $minRectangularityMagenta)")
+            if (rectangularity < minRectangularityMagenta) return false
+
+            val hull = MatOfInt()
+            Imgproc.convexHull(contour, hull)
+            val hullPoints = hull.toArray()
+            val contourPoints = contour.toArray()
+            val hullContour = MatOfPoint()
+            val hullPointsList = mutableListOf<Point>()
+            for (index in hullPoints) {
+                if (index < contourPoints.size) hullPointsList.add(contourPoints[index])
+            }
+            hullContour.fromArray(*hullPointsList.toTypedArray())
+            val hullArea = Imgproc.contourArea(hullContour)
+            val convexity = if (hullArea > 0) area / hullArea else 0.0
+            if (debugMode) Log.d("ColorAnalyzer", "[Magenta] Convexidad: $convexity (mín: $minConvexityMagenta)")
+            if (convexity < minConvexityMagenta) {
+                hull.release(); hullContour.release()
+                return false
+            }
+
+            try {
+                val defects = MatOfInt4()
+                Imgproc.convexityDefects(contour, hull, defects)
+                val numDefects = defects.rows()
+                if (debugMode) Log.d("ColorAnalyzer", "[Magenta] Defectos de convexidad: $numDefects (máx: $maxConvexityDefectsMagenta)")
+                if (numDefects > maxConvexityDefectsMagenta) {
+                    hull.release(); hullContour.release(); defects.release()
+                    return false
+                }
+                defects.release()
+            } catch (e: Exception) {
+                if (debugMode) Log.w("ColorAnalyzer", "[Magenta] No se pudieron calcular defectos: ${e.message}")
+            }
+
+            hull.release()
+            hullContour.release()
+            if (debugMode) Log.d("ColorAnalyzer", "✅ [Magenta] Forma aceptada con filtro específico")
+            return true
+        } catch (e: Exception) {
+            Log.e("ColorAnalyzer", "Error en filtro rectangular magenta: ${e.message}")
+            return false
+        }
+
+
+    }
+
+    /** true si el centro X normalizado (0.0-1.0) está dentro de la franja extrema
+     *  de cualquiera de los dos bordes de la pantalla — usado para reclasificar
+     *  un contorno Rojo/Verde como estacionamiento cuando el color es ambiguo. */
+    private fun isAtExtremeEdge(centerX: Float, imageWidth: Int): Boolean {
+        val normalizedX = centerX / imageWidth.toFloat()
+        return normalizedX <= parkingEdgeZone || normalizedX >= (1f - parkingEdgeZone)
+    }
+
+
     /**
      * CONVERTIDOR DE IMAGEPROXY A BITMAP
      * Convierte la imagen capturada por la cámara (formato YUV) a Bitmap
@@ -1118,5 +1702,141 @@ class ColorAnalyzer(private val callback: (String, Bitmap?, DualObjectDetection)
         }
     }
 
+
+    /**
+     * FILTRO ANTI-REFLEJO POR SATURACIÓN INTERNA
+     *
+     * Analiza la saturación promedio de los píxeles DENTRO del contorno en la imagen HSV.
+     * Los reflejos en superficies brillantes pierden saturación: el color se mezcla con
+     * el blanco/gris de la pista, produciendo un S promedio más bajo que el objeto real.
+     *
+     * @param contour     Contorno a evaluar
+     * @param hsvMat      Imagen completa en formato HSV (para muestrear píxeles internos)
+     * @return true si la saturación interna es suficiente (objeto real), false si es reflejo
+     */
+    /**
+     * Calcula el promedio de Hue, Saturación y Valor (canal por canal) dentro de un contorno.
+     * Se usa para alimentar la ventana de calibración por muestras (promedio de Hue real
+     * del objeto en distintos puntos de la pista).
+     */
+    private fun computeContourMeanHsv(contour: MatOfPoint, hsvMat: Mat): Triple<Double, Double, Double> {
+        val mask = Mat.zeros(hsvMat.size(), CvType.CV_8UC1)
+        Imgproc.drawContours(mask, listOf(contour), -1, Scalar(255.0), -1)
+        val meanHsv = Core.mean(hsvMat, mask)
+        mask.release()
+        return Triple(meanHsv.`val`[0], meanHsv.`val`[1], meanHsv.`val`[2])
+    }
+
+    private fun hasRealObjectSaturation(contour: MatOfPoint, hsvMat: Mat, threshold: Double, colorLabel: String = ""): Boolean {
+        return try {
+            // Crear máscara del tamaño del ROI, toda en negro
+            val mask = Mat.zeros(hsvMat.size(), CvType.CV_8UC1)
+
+            // Pintar en blanco solo el interior del contorno
+            Imgproc.drawContours(mask, listOf(contour), -1, Scalar(255.0), -1)
+
+            // Separar canales HSV para acceder solo al canal S
+            val channels = ArrayList<Mat>()
+            Core.split(hsvMat, channels)
+            val saturationChannel = channels[1] // Canal S
+
+            // Calcular media de saturación SOLO dentro de la máscara del contorno
+            val meanSat = Core.mean(saturationChannel, mask)
+            val avgSaturation = meanSat.`val`[0]
+
+            // Liberar memoria
+            mask.release()
+            channels.forEach { it.release() }
+
+            if (debugMode) {
+                Log.d("ColorAnalyzer", "[$colorLabel] Saturación interna promedio: ${"%.1f".format(avgSaturation)} (mín: $threshold)")
+            }
+
+            if (avgSaturation < threshold) {
+                if (debugMode) Log.d("ColorAnalyzer", "❌ [$colorLabel] Rechazado como reflejo: saturación baja (${"%.1f".format(avgSaturation)})")
+                false
+            } else {
+                true
+            }
+        } catch (e: Exception) {
+            Log.w("ColorAnalyzer", "Error en filtro saturación: ${e.message}")
+            true // en caso de error, no rechazar
+        }
+    }
+
+    private fun computeRealObjectScore(contour: MatOfPoint, hsvMat: Mat): Double {
+        return try {
+            val area = Imgproc.contourArea(contour)
+            if (area <= 0) return 0.0
+
+            val boundingRect = Imgproc.boundingRect(contour)
+            val bboxArea = (boundingRect.width * boundingRect.height).toDouble()
+            val solidity = if (bboxArea > 0) (area / bboxArea).coerceIn(0.0, 1.0) else 0.0
+
+            val mask = Mat.zeros(hsvMat.size(), CvType.CV_8UC1)
+            Imgproc.drawContours(mask, listOf(contour), -1, Scalar(255.0), -1)
+            val channels = ArrayList<Mat>()
+            Core.split(hsvMat, channels)
+            val meanSat = Core.mean(channels[1], mask).`val`[0]
+            val satScore = (meanSat / 255.0).coerceIn(0.0, 1.0)
+
+            mask.release()
+            channels.forEach { it.release() }
+
+            val score = (solidity * 0.6) + (satScore * 0.4)
+
+            if (debugMode) {
+                Log.d("ColorAnalyzer", "Score calidad: ${"%.3f".format(score)} " +
+                        "(solidez=${"%.3f".format(solidity)}, sat=${"%.1f".format(meanSat)})")
+            }
+
+            score
+        } catch (e: Exception) {
+            Log.w("ColorAnalyzer", "Error calculando score: ${e.message}")
+            0.5
+        }
+    }
+
+    private fun computeShapeDiagnostics(contour: MatOfPoint, area: Double): String {
+        return try {
+            val boundingRect = Imgproc.boundingRect(contour)
+            val aspectRatio = boundingRect.width.toDouble() / boundingRect.height.toDouble()
+            val boundingRectArea = boundingRect.width * boundingRect.height
+            val rectangularity = area / boundingRectArea.toDouble()
+
+            val hull = MatOfInt()
+            Imgproc.convexHull(contour, hull)
+            val hullPoints = hull.toArray()
+            val contourPoints = contour.toArray()
+            val hullContour = MatOfPoint()
+            val hullPointsList = mutableListOf<Point>()
+            for (index in hullPoints) {
+                if (index < contourPoints.size) hullPointsList.add(contourPoints[index])
+            }
+            hullContour.fromArray(*hullPointsList.toTypedArray())
+            val hullArea = Imgproc.contourArea(hullContour)
+            val convexity = if (hullArea > 0) area / hullArea else 0.0
+
+            var numDefects = -1
+            try {
+                val defects = MatOfInt4()
+                Imgproc.convexityDefects(contour, hull, defects)
+                numDefects = defects.rows()
+                defects.release()
+            } catch (e: Exception) { /* algunos contornos no tienen defectos calculables */ }
+
+            val contour2f = MatOfPoint2f(*contour.toArray())
+            val epsilon = 0.02 * Imgproc.arcLength(contour2f, true)
+            val approx = MatOfPoint2f()
+            Imgproc.approxPolyDP(contour2f, approx, epsilon, true)
+            val vertices = approx.toArray().size
+
+            hull.release(); hullContour.release(); contour2f.release(); approx.release()
+
+            "rect=${"%.2f".format(rectangularity)} conv=${"%.2f".format(convexity)} def=$numDefects vert=$vertices asp=${"%.2f".format(aspectRatio)}"
+        } catch (e: Exception) {
+            "diag error: ${e.message}"
+        }
+    }
 
 }

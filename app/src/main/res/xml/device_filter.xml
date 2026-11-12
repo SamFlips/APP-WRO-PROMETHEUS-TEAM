@@ -3,6 +3,9 @@
     <!-- CH340 USB-Serial chip (muy común en Arduinos clones) -->
     <usb-device vendor-id="6790" product-id="29987" />
 
+    <!-- CH9102X (VID 6790, PID 21972 en decimal) -->
+    <usb-device vendor-id="6790" product-id="21972" />
+
     <!-- Arduino Uno original -->
     <usb-device vendor-id="9025" product-id="67" />
 
@@ -10,7 +13,7 @@
     <usb-device vendor-id="1027" product-id="24577" />
 
     <!-- ESP32 (Silicon Labs) -->
-    <usb-device vendor-id="10C4" product-id="EA60" />
+    <usb-device vendor-id="4292" product-id="60000" />
 
 
     <!-- Agregamos más variantes comunes -->

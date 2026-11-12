@@ -13,4 +13,9 @@
 .externalNativeBuild
 .cxx
 local.properties
-
+app/release/
+/OpenCV/build/
+*.apk
+*.aar
+*.so
+*.a
